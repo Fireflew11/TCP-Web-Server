@@ -1,6 +1,5 @@
 #define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
-
 #include <iostream>
 using namespace std;
 #pragma comment(lib, "Ws2_32.lib")
@@ -31,7 +30,7 @@ struct SocketState
 	int	recv;			// Receiving?
 	int	send;			// Sending?
 	HTTPRequestTypes sendSubType;	// Sending sub-type
-	char buffer[128];
+	char buffer[512];
 	int len;
 };
 
@@ -52,7 +51,7 @@ void acceptConnection(int index);
 void receiveMessage(int index);
 void sendMessage(int index);
 void optionsCommand(char* sendBuff, int& bytesSent);
-void getCommand(char* sendBuff, int& bytesSent);
+void getCommand(char* sendBuff, int& bytesSent, SocketState curSocket);
 void headCommand(char* sendBuff, int& bytesSent);
 void postCommand(char* sendBuff, int& bytesSent, const char* body);
 void putCommand(char* sendBuff, int& bytesSent);
@@ -290,8 +289,7 @@ void receiveMessage(int index)
 {
 	SOCKET msgSocket = sockets[index].id;
 
-	int len = sockets[index].len;
-	int bytesRecv = recv(msgSocket, &sockets[index].buffer[len], sizeof(sockets[index].buffer) - len, 0);
+	int bytesRecv = recv(msgSocket, sockets[index].buffer, sizeof(sockets[index].buffer) - 1, 0);
 
 	if (SOCKET_ERROR == bytesRecv)
 	{
@@ -308,10 +306,8 @@ void receiveMessage(int index)
 	}
 	else
 	{
-		sockets[index].buffer[len + bytesRecv] = '\0'; // Add the null-terminating to make it a string
-		std::cout << "Web Server: Received: " << bytesRecv << " bytes of \"" << &sockets[index].buffer[len] << "\" message.\n";
-
-		sockets[index].len += bytesRecv;
+		sockets[index].buffer[bytesRecv] = '\0'; // Add null-terminator to make it a string
+		std::cout << "Web Server: Received: " << bytesRecv << " bytes of \"" << sockets[index].buffer << "\" message.\n";
 
 		// Extract the request line
 		char* requestLine = strtok(sockets[index].buffer, "\r\n");
@@ -339,14 +335,13 @@ void receiveMessage(int index)
 
 				// Extract the query string from the URL
 				char* queryString = strchr(url, '?');
+				char lang[32] = "en"; // Default to "en"
 				if (queryString != nullptr)
 				{
-					*queryString = '\0'; // Terminate URL at '?'
 					queryString++; // Move to the query string part
 
 					// Parse the query string to find the "lang" parameter
 					char* token = strtok(queryString, "&");
-					char lang[32] = "";
 					while (token != nullptr)
 					{
 						if (strncmp(token, "lang=", 5) == 0)
@@ -356,18 +351,15 @@ void receiveMessage(int index)
 						}
 						token = strtok(nullptr, "&");
 					}
-
 					std::cout << "Web Server: Path: " << url << ", Query: " << queryString << ", Lang: " << lang << std::endl;
-
-					// Pass the lang parameter to the getCommand method
-					sockets[index].len = sprintf(sockets[index].buffer, "%s", lang);
 				}
 				else
 				{
 					std::cout << "Web Server: Path: " << url << ", No Query" << std::endl;
-					sockets[index].buffer[0] = '\0'; // No lang parameter
-					sockets[index].len = 0;
 				}
+
+				// Pass the lang parameter to the buffer for later use in sendMessage
+				sockets[index].len = sprintf(sockets[index].buffer, "lang=%s", lang);
 			}
 			else if (strcmp(method, "HEAD") == 0)
 			{
@@ -400,20 +392,14 @@ void receiveMessage(int index)
 				removeSocket(index);
 				return;
 			}
-
-			// Save the remaining part of the buffer
-			int remainingDataLength = sockets[index].len - (requestLine - sockets[index].buffer) - strlen(requestLine) - 2;
-			memmove(sockets[index].buffer, requestLine + strlen(requestLine) + 2, remainingDataLength);
-			sockets[index].len = remainingDataLength;
 		}
 	}
 }
 
-
 void sendMessage(int index)
 {
 	int bytesSent = 0;
-	char sendBuff[255];
+	char sendBuff[512];
 
 	SOCKET msgSocket = sockets[index].id;
 	if (sockets[index].sendSubType == HTTPRequestTypes::OPTIONS)
@@ -421,7 +407,7 @@ void sendMessage(int index)
 		optionsCommand(sendBuff, bytesSent);
 	}
 	else if (sockets[index].sendSubType == HTTPRequestTypes::GET) {
-		getCommand(sendBuff, bytesSent);
+		getCommand(sendBuff, bytesSent, sockets[index]);
 	}
 	else if (sockets[index].sendSubType == HTTPRequestTypes::HEAD) {
 		headCommand(sendBuff, bytesSent);
@@ -503,13 +489,27 @@ void HeadMethodHandler(string& response, string& socketBuffer) { // כעיקרו
 }
 
 // פונקציה שמטפלת בבקשת OPTIONS
-void OptionsMethodHandler(string& response) {
-	string status = "204 no content";
+//void OptionsMethodHandler(string& response) {
+//	string status = "204 no content";
+//	string contentType = "text/html";
+//
+//	makeHeader(response, status, contentType);
+//	response += "Supported methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
+//}
+void OptionsMethodHandler(string& response)
+{
+	string status = "200 OK";
 	string contentType = "text/html";
+	string body = "Supported methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE";
 
-	makeHeader(response, status, contentType);
-	response += "Supported methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
+	// Create the response header
+	response = "HTTP/1.1 " + status + lineSuffix;
+	response += "Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
+	response += "Content-Type: " + contentType + lineSuffix;
+	response += "Content-Length: " + to_string(body.length()) + lineSuffix + lineSuffix;
+	response += body;
 }
+
 
 // פונקציה שמטפלת בבקשות שאינן מותרות
 void NotAllowMethodHandler(string& response) {// לבדוק אם צריך
@@ -576,10 +576,10 @@ void DeleteMethodHandler(string& response, string& socketBuffer) {
 	makeBody(response, body);
 }
 
-void getCommand(char* sendBuff, int& bytesSent) {
+void getCommand(char* sendBuff, int& bytesSent, SocketState curSocket) {
 	string response;
 	string socketBuffer = "GET /index.html HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
-	GetMethodHandler(response, socketBuffer);
+	GetMethodHandler(response, socketBuffer, curSocket.buffer);
 	bytesSent = response.size();
 	strcpy(sendBuff, response.c_str());
 }
