@@ -295,7 +295,7 @@ void receiveMessage(int index)
 
 	if (SOCKET_ERROR == bytesRecv)
 	{
-		cout << "Web Server: Error at recv(): " << WSAGetLastError() << endl;
+		std::cout << "Web Server: Error at recv(): " << WSAGetLastError() << std::endl;
 		closesocket(msgSocket);
 		removeSocket(index);
 		return;
@@ -308,79 +308,107 @@ void receiveMessage(int index)
 	}
 	else
 	{
-		sockets[index].buffer[len + bytesRecv] = '\0'; //add the null-terminating to make it a string
-		cout << "Web Server: Recieved: " << bytesRecv << " bytes of \"" << &sockets[index].buffer[len] << "\" message.\n";
+		sockets[index].buffer[len + bytesRecv] = '\0'; // Add the null-terminating to make it a string
+		std::cout << "Web Server: Received: " << bytesRecv << " bytes of \"" << &sockets[index].buffer[len] << "\" message.\n";
 
 		sockets[index].len += bytesRecv;
 
-		if (sockets[index].len > 0)
+		// Extract the request line
+		char* requestLine = strtok(sockets[index].buffer, "\r\n");
+		if (requestLine != nullptr)
 		{
-			if (strncmp(sockets[index].buffer, "OPTIONS", 7) == 0)
+			char method[8];
+			char url[128];
+			char version[16];
+
+			// Parse the request line
+			sscanf(requestLine, "%s %s %s", method, url, version);
+
+			std::cout << "Web Server: Method: " << method << ", URL: " << url << ", Version: " << version << std::endl;
+
+			// Check the method and set the sendSubType accordingly
+			if (strcmp(method, "OPTIONS") == 0)
 			{
 				sockets[index].send = SEND;
 				sockets[index].sendSubType = HTTPRequestTypes::OPTIONS;
-				memcpy(sockets[index].buffer, &sockets[index].buffer[7], sockets[index].len - 7);
-				sockets[index].len -= 7;
-				return;
 			}
-			else if (strncmp(sockets[index].buffer, "GET", 3) == 0)
+			else if (strcmp(method, "GET") == 0)
 			{
 				sockets[index].send = SEND;
 				sockets[index].sendSubType = HTTPRequestTypes::GET;
-				memcpy(sockets[index].buffer, &sockets[index].buffer[3], sockets[index].len - 3);
-				sockets[index].len -= 3;
-				return;
+
+				// Extract the query string from the URL
+				char* queryString = strchr(url, '?');
+				if (queryString != nullptr)
+				{
+					*queryString = '\0'; // Terminate URL at '?'
+					queryString++; // Move to the query string part
+
+					// Parse the query string to find the "lang" parameter
+					char* token = strtok(queryString, "&");
+					char lang[32] = "";
+					while (token != nullptr)
+					{
+						if (strncmp(token, "lang=", 5) == 0)
+						{
+							strcpy(lang, token + 5);
+							break;
+						}
+						token = strtok(nullptr, "&");
+					}
+
+					std::cout << "Web Server: Path: " << url << ", Query: " << queryString << ", Lang: " << lang << std::endl;
+
+					// Pass the lang parameter to the getCommand method
+					sockets[index].len = sprintf(sockets[index].buffer, "%s", lang);
+				}
+				else
+				{
+					std::cout << "Web Server: Path: " << url << ", No Query" << std::endl;
+					sockets[index].buffer[0] = '\0'; // No lang parameter
+					sockets[index].len = 0;
+				}
 			}
-			else if (strncmp(sockets[index].buffer, "HEAD", 4) == 0)
+			else if (strcmp(method, "HEAD") == 0)
 			{
 				sockets[index].send = SEND;
 				sockets[index].sendSubType = HTTPRequestTypes::HEAD;
-				memcpy(sockets[index].buffer, &sockets[index].buffer[4], sockets[index].len - 4);
-				sockets[index].len -= 4;
-				return;
 			}
-			else if (strncmp(sockets[index].buffer, "POST", 4) == 0)
+			else if (strcmp(method, "POST") == 0)
 			{
 				sockets[index].send = SEND;
 				sockets[index].sendSubType = HTTPRequestTypes::POST;
-				memcpy(sockets[index].buffer, &sockets[index].buffer[4], sockets[index].len - 4);
-				sockets[index].len -= 4;
-				return;
 			}
-			else if (strncmp(sockets[index].buffer, "PUT", 3) == 0)
+			else if (strcmp(method, "PUT") == 0)
 			{
 				sockets[index].send = SEND;
 				sockets[index].sendSubType = HTTPRequestTypes::PUT;
-				memcpy(sockets[index].buffer, &sockets[index].buffer[3], sockets[index].len - 3);
-				sockets[index].len -= 3;
-				return;
 			}
-			else if (strncmp(sockets[index].buffer, "DELETE", 6) == 0)
+			else if (strcmp(method, "DELETE") == 0)
 			{
 				sockets[index].send = SEND;
 				sockets[index].sendSubType = HTTPRequestTypes::DELETE;
-				memcpy(sockets[index].buffer, &sockets[index].buffer[6], sockets[index].len - 6);
-				sockets[index].len -= 6;
-				return;
 			}
-			else if (strncmp(sockets[index].buffer, "TRACE", 5) == 0)
+			else if (strcmp(method, "TRACE") == 0)
 			{
 				sockets[index].send = SEND;
 				sockets[index].sendSubType = HTTPRequestTypes::TRACE;
-				memcpy(sockets[index].buffer, &sockets[index].buffer[5], sockets[index].len - 5);
-				sockets[index].len -= 5;
-				return;
 			}
-			else if (strncmp(sockets[index].buffer, "Exit", 4) == 0)
+			else if (strcmp(method, "Exit") == 0)
 			{
 				closesocket(msgSocket);
 				removeSocket(index);
 				return;
 			}
+
+			// Save the remaining part of the buffer
+			int remainingDataLength = sockets[index].len - (requestLine - sockets[index].buffer) - strlen(requestLine) - 2;
+			memmove(sockets[index].buffer, requestLine + strlen(requestLine) + 2, remainingDataLength);
+			sockets[index].len = remainingDataLength;
 		}
 	}
-
 }
+
 
 void sendMessage(int index)
 {
