@@ -18,118 +18,6 @@ void makeBody(string& response, string body)
     response += body;
 }
 
-string escapeHTML(const string& input)
-{
-    string output;
-    for (char c : input)
-    {
-        switch (c)
-        {
-        case '&': output += "&amp;"; break;
-        case '<': output += "&lt;"; break;
-        case '>': output += "&gt;"; break;
-        case '"': output += "&quot;"; break;
-        case '\'': output += "&apos;"; break;
-        default: output += c; break;
-        }
-    }
-    return output;
-}
-
-void GetMethodHandler(string& response, string& socketBuffer, const char* queryString)
-{
-    string status = "200 OK";
-    string resourcePath = "/index.html";
-    string contentType = "text/html";
-    string HTMLContent;
-
-    if (queryString != nullptr)
-    {
-        const char* langParam = strstr(queryString, "lang=");
-        if (langParam != nullptr)
-        {
-            langParam += 5;
-            if (strncmp(langParam, "he", 2) == 0)
-                HTMLContent = "<html><body><h1>!שלום עולם</h1></body></html>";
-            else if (strncmp(langParam, "fr", 2) == 0)
-                HTMLContent = "<html><body><h1>Bonjour le monde!</h1></body></html>";
-            else
-                HTMLContent = "<html><body><h1>Hello World!</h1></body></html>";
-        }
-    }
-
-    makeHeader(response, status, contentType);
-    makeBody(response, HTMLContent);
-}
-
-void HeadMethodHandler(string& response, string& socketBuffer)
-{
-    GetMethodHandler(response, socketBuffer);
-}
-
-void OptionsMethodHandler(string& response)
-{
-    string status = "200 OK";
-    string contentType = "text/html";
-    string body = "Supported methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE";
-
-    response = "HTTP/1.1 " + status + lineSuffix;
-    response += "Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
-    response += "Content-Type: " + contentType + lineSuffix;
-    response += "Content-Length: " + to_string(body.length()) + lineSuffix + lineSuffix;
-    response += body;
-}
-
-void NotAllowMethodHandler(string& response)
-{
-    string status = "405 Method Not Allowed";
-    string contentType = "text/html";
-
-    makeHeader(response, status, contentType);
-    response += "Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
-    response += "Connection: close" + lineSuffix + lineSuffix;
-}
-
-void TraceMethodHandler(string& response, string& socketBuffer)
-{
-    string status = "200 OK";
-    string contentType = "message/http";
-    string traceString = "TRACE " + socketBuffer;
-
-    makeHeader(response, status, contentType);
-    makeBody(response, traceString);
-}
-
-void PutMethodHandler(string& response, const char* body)
-{
-    string status = "200 OK";
-    string contentType = "text/html";
-    string putBody = makePostBody(body);
-
-    makeHeader(response, status, contentType);
-    makeBody(response, putBody);
-}
-
-void PostMethodHandler(string& response, const char* body)
-{
-    string status = "200 OK";
-    string contentType = "text/html";
-    string postBody = makePostBody(body);
-
-    makeHeader(response, status, contentType);
-    makeBody(response, postBody);
-}
-
-void DeleteMethodHandler(string& response, string& socketBuffer)
-{
-    string status = "200 OK";
-    string contentType = "text/html";
-    string body = "<html><body><h1>Resource Deleted Successfully</h1></body></html>";
-
-    makeHeader(response, status, contentType);
-    makeBody(response, body);
-}
-
 void optionsCommand(char* sendBuff, int& bytesSent, const char* buffer)
 {
     string response = "HTTP/1.1 200 OK\r\n";
@@ -217,6 +105,15 @@ string makePostBody(const string& body)
 }
 
 
+void PostMethodHandler(string& response, string& socketBuffer, const char* body) {
+    string status = "201 Created";
+    string contentType = "text/html";
+    string postBody = makePostBody(body); //אמור להכניס לבודי את תוכן הבקשה - צריכים להניח שזה סטרינג
+
+    makeHeader(response, status, contentType);
+    makeBody(response, postBody);
+}
+
 void postCommand(char* sendBuff, int& bytesSent, const char* buffer)
 {
     char method[8], query[128], body[512];
@@ -228,7 +125,6 @@ void postCommand(char* sendBuff, int& bytesSent, const char* buffer)
         *methodEnd = '\0';
         strcpy(method, bufferCopy);
     }
-
     // Extract the query
     char* queryStart = methodEnd + 2; // Skip "\r\n"
     char* queryEnd = strchr(queryStart, '\r');
@@ -244,30 +140,14 @@ void postCommand(char* sendBuff, int& bytesSent, const char* buffer)
 
     std::cout << "Web Server: POST Body: " << body << std::endl;
 
-
-    string status = "200 OK";
-    string contentType = "text/html";
-    string postBody = makePostBody(body);
-
-    makeHeader(response, status, contentType);
-    makeBody(response, postBody);
-
-
-
-
-
-    string response = "HTTP/1.1 201 Created\r\n";
-    response += "Content-Type: text/html\r\n";
-    response += "Content-Length: " + to_string(strlen(body)) + "\r\n\r\n";
-    response += makePostBody(string(body));
-
+    string response;
+    string Buffer = "POST /create HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\nTest file content";
+    PostMethodHandler(response, Buffer, body);
     bytesSent = response.size();
     strcpy(sendBuff, response.c_str());
+    
     free(bufferCopy);
 }
-
-
-
 
 
 void putCommand(char* sendBuff, int& bytesSent, const char* buffer)
