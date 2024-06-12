@@ -127,11 +127,13 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="httpCommands.cpp" />
+    <ClCompile Include="http.cpp" />
+    <ClCompile Include="Server.cpp" />
     <ClCompile Include="TCPWebServer.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="httpCommands.h" />
+    <ClInclude Include="http.h" />
+    <ClInclude Include="Server.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

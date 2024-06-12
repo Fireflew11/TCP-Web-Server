@@ -1,3 +1,4 @@
+/*
 #define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <iostream>
@@ -613,3 +614,4 @@ void traceCommand(char* sendBuff, int& bytesSent, SocketState socket)
     bytesSent = response.size();
     strcpy(sendBuff, response.c_str());
 }
+*/
