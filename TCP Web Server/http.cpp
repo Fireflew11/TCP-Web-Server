@@ -244,6 +244,18 @@ void postCommand(char* sendBuff, int& bytesSent, const char* buffer)
 
     std::cout << "Web Server: POST Body: " << body << std::endl;
 
+
+    string status = "200 OK";
+    string contentType = "text/html";
+    string postBody = makePostBody(body);
+
+    makeHeader(response, status, contentType);
+    makeBody(response, postBody);
+
+
+
+
+
     string response = "HTTP/1.1 201 Created\r\n";
     response += "Content-Type: text/html\r\n";
     response += "Content-Length: " + to_string(strlen(body)) + "\r\n\r\n";
