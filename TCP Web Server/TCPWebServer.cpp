@@ -1,37 +1,39 @@
 #define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <iostream>
-using namespace std;
-#pragma comment(lib, "Ws2_32.lib")
+#include <sstream>
 #include <winsock2.h>
 #include <string.h>
-#include <time.h>
 #include <ctime>
 #include <unordered_map>
-#include <sstream>
 #include <algorithm>
+
+#pragma comment(lib, "Ws2_32.lib")
 #ifdef DELETE
 #undef DELETE
 #endif // DELETE
 
+using namespace std;
+
 enum HTTPRequestTypes {
-	OPTIONS = 1,
-	GET = 2,
-	HEAD = 3,
-	POST = 4,
-	PUT = 5,
-	DELETE = 6,
-	TRACE = 7,
+    OPTIONS = 1,
+    GET = 2,
+    HEAD = 3,
+    POST = 4,
+    PUT = 5,
+    DELETE = 6,
+    TRACE = 7,
 };
 
 struct SocketState
 {
-	SOCKET id;			// Socket handle
-	int	recv;			// Receiving?
-	int	send;			// Sending?
-	HTTPRequestTypes sendSubType;	// Sending sub-type
-	char buffer[512];
-	int len;
+    SOCKET id;            // Socket handle
+    int recv;            // Receiving?
+    int send;            // Sending?
+    HTTPRequestTypes sendSubType;    // Sending sub-type
+    char buffer[512];
+    int len;
+    int lastIndex;       // New field to keep track of the buffer index
 };
 
 const int TIME_PORT = 27015;
@@ -54,671 +56,560 @@ void optionsCommand(char* sendBuff, int& bytesSent);
 void getCommand(char* sendBuff, int& bytesSent, SocketState curSocket);
 void headCommand(char* sendBuff, int& bytesSent);
 void postCommand(char* sendBuff, int& bytesSent, const char* body);
-void putCommand(char* sendBuff, int& bytesSent);
+void putCommand(char* sendBuff, int& bytesSent, const char* body);
 void deleteCommand(char* sendBuff, int& bytesSent);
-void traceCommand(char* sendBuff, int& bytesSent);
+void traceCommand(char* sendBuff, int& bytesSent, SocketState socket);
+string makePostBody(const string& body);
 
 struct SocketState sockets[MAX_SOCKETS] = { 0 };
 int socketsCount = 0;
 
-
 void main()
 {
-	// Initialize Winsock (Windows Sockets).
+    // Initialize Winsock (Windows Sockets).
+    WSAData wsaData;
 
-	// Create a WSADATA object called wsaData.
-	// The WSADATA structure contains information about the Windows 
-	// Sockets implementation.
-	WSAData wsaData;
+    if (NO_ERROR != WSAStartup(MAKEWORD(2, 2), &wsaData))
+    {
+        cout << "Web Server: Error at WSAStartup()\n";
+        return;
+    }
 
-	// Call WSAStartup and return its value as an integer and check for errors.
-	// The WSAStartup function initiates the use of WS2_32.DLL by a process.
-	// First parameter is the version number 2.2.
-	// The WSACleanup function destructs the use of WS2_32.DLL by a process.
-	if (NO_ERROR != WSAStartup(MAKEWORD(2, 2), &wsaData))
-	{
-		cout << "Web Server: Error at WSAStartup()\n";
-		return;
-	}
+    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-	// Server side:
-	// Create and bind a socket to an internet address.
-	// Listen through the socket for incoming connections.
+    if (INVALID_SOCKET == listenSocket)
+    {
+        cout << "Web Server: Error at socket(): " << WSAGetLastError() << endl;
+        WSACleanup();
+        return;
+    }
 
-	// After initialization, a SOCKET object is ready to be instantiated.
+    sockaddr_in serverService;
+    serverService.sin_family = AF_INET;
+    serverService.sin_addr.s_addr = INADDR_ANY;
+    serverService.sin_port = htons(TIME_PORT);
 
-	// Create a SOCKET object called listenSocket. 
-	// For this application:	use the Internet address family (AF_INET), 
-	//							streaming sockets (SOCK_STREAM), 
-	//							and the TCP/IP protocol (IPPROTO_TCP).
-	SOCKET listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (SOCKET_ERROR == bind(listenSocket, (SOCKADDR*)&serverService, sizeof(serverService)))
+    {
+        cout << "Web Server: Error at bind(): " << WSAGetLastError() << endl;
+        closesocket(listenSocket);
+        WSACleanup();
+        return;
+    }
 
-	// Check for errors to ensure that the socket is a valid socket.
-	// Error detection is a key part of successful networking code. 
-	// If the socket call fails, it returns INVALID_SOCKET. 
-	// The if statement in the previous code is used to catch any errors that
-	// may have occurred while creating the socket. WSAGetLastError returns an 
-	// error number associated with the last error that occurred.
-	if (INVALID_SOCKET == listenSocket)
-	{
-		cout << "Web Server: Error at socket(): " << WSAGetLastError() << endl;
-		WSACleanup();
-		return;
-	}
+    if (SOCKET_ERROR == listen(listenSocket, 5))
+    {
+        cout << "Time Server: Error at listen(): " << WSAGetLastError() << endl;
+        closesocket(listenSocket);
+        WSACleanup();
+        return;
+    }
+    addSocket(listenSocket, LISTEN);
 
-	// For a server to communicate on a network, it must bind the socket to 
-	// a network address.
+    while (true)
+    {
+        fd_set waitRecv;
+        FD_ZERO(&waitRecv);
+        for (int i = 0; i < MAX_SOCKETS; i++)
+        {
+            if ((sockets[i].recv == LISTEN) || (sockets[i].recv == RECEIVE))
+                FD_SET(sockets[i].id, &waitRecv);
+        }
 
-	// Need to assemble the required data for connection in sockaddr structure.
+        fd_set waitSend;
+        FD_ZERO(&waitSend);
+        for (int i = 0; i < MAX_SOCKETS; i++)
+        {
+            if (sockets[i].send == SEND)
+                FD_SET(sockets[i].id, &waitSend);
+        }
 
-	// Create a sockaddr_in object called serverService. 
-	sockaddr_in serverService;
-	// Address family (must be AF_INET - Internet address family).
-	serverService.sin_family = AF_INET;
-	// IP address. The sin_addr is a union (s_addr is a unsigned long 
-	// (4 bytes) data type).
-	// inet_addr (Iternet address) is used to convert a string (char *) 
-	// into unsigned long.
-	// The IP address is INADDR_ANY to accept connections on all interfaces.
-	serverService.sin_addr.s_addr = INADDR_ANY;
-	// IP Port. The htons (host to network - short) function converts an
-	// unsigned short from host to TCP/IP network byte order 
-	// (which is big-endian).
-	serverService.sin_port = htons(TIME_PORT);
+        int nfd;
+        nfd = select(0, &waitRecv, &waitSend, NULL, NULL);
+        if (nfd == SOCKET_ERROR)
+        {
+            cout << "Web Server: Error at select(): " << WSAGetLastError() << endl;
+            WSACleanup();
+            return;
+        }
 
-	// Bind the socket for client's requests.
+        for (int i = 0; i < MAX_SOCKETS && nfd > 0; i++)
+        {
+            if (FD_ISSET(sockets[i].id, &waitRecv))
+            {
+                nfd--;
+                switch (sockets[i].recv)
+                {
+                case LISTEN:
+                    acceptConnection(i);
+                    break;
 
-	// The bind function establishes a connection to a specified socket.
-	// The function uses the socket handler, the sockaddr structure (which
-	// defines properties of the desired connection) and the length of the
-	// sockaddr structure (in bytes).
-	if (SOCKET_ERROR == bind(listenSocket, (SOCKADDR*)&serverService, sizeof(serverService)))
-	{
-		cout << "Web Server: Error at bind(): " << WSAGetLastError() << endl;
-		closesocket(listenSocket);
-		WSACleanup();
-		return;
-	}
+                case RECEIVE:
+                    receiveMessage(i);
+                    break;
+                }
+            }
+        }
 
-	// Listen on the Socket for incoming connections.
-	// This socket accepts only one connection (no pending connections 
-	// from other clients). This sets the backlog parameter.
-	if (SOCKET_ERROR == listen(listenSocket, 5))
-	{
-		cout << "Time Server: Error at listen(): " << WSAGetLastError() << endl;
-		closesocket(listenSocket);
-		WSACleanup();
-		return;
-	}
-	addSocket(listenSocket, LISTEN);
+        for (int i = 0; i < MAX_SOCKETS && nfd > 0; i++)
+        {
+            if (FD_ISSET(sockets[i].id, &waitSend))
+            {
+                nfd--;
+                switch (sockets[i].send)
+                {
+                case SEND:
+                    sendMessage(i);
+                    break;
+                }
+            }
+        }
+    }
 
-	// Accept connections and handles them one by one.
-	while (true)
-	{
-		// The select function determines the status of one or more sockets,
-		// waiting if necessary, to perform asynchronous I/O. Use fd_sets for
-		// sets of handles for reading, writing and exceptions. select gets "timeout" for waiting
-		// and still performing other operations (Use NULL for blocking). Finally,
-		// select returns the number of descriptors which are ready for use (use FD_ISSET
-		// macro to check which descriptor in each set is ready to be used).
-		fd_set waitRecv;
-		FD_ZERO(&waitRecv);
-		for (int i = 0; i < MAX_SOCKETS; i++)
-		{
-			if ((sockets[i].recv == LISTEN) || (sockets[i].recv == RECEIVE))
-				FD_SET(sockets[i].id, &waitRecv);
-		}
-
-		fd_set waitSend;
-		FD_ZERO(&waitSend);
-		for (int i = 0; i < MAX_SOCKETS; i++)
-		{
-			if (sockets[i].send == SEND)
-				FD_SET(sockets[i].id, &waitSend);
-		}
-
-		//
-		// Wait for interesting event.
-		// Note: First argument is ignored. The fourth is for exceptions.
-		// And as written above the last is a timeout, hence we are blocked if nothing happens.
-		//
-		int nfd;
-		nfd = select(0, &waitRecv, &waitSend, NULL, NULL);
-		if (nfd == SOCKET_ERROR)
-		{
-			cout << "Web Server: Error at select(): " << WSAGetLastError() << endl;
-			WSACleanup();
-			return;
-		}
-
-		for (int i = 0; i < MAX_SOCKETS && nfd > 0; i++)
-		{
-			if (FD_ISSET(sockets[i].id, &waitRecv))
-			{
-				nfd--;
-				switch (sockets[i].recv)
-				{
-				case LISTEN:
-					acceptConnection(i);
-					break;
-
-				case RECEIVE:
-					receiveMessage(i);
-					break;
-				}
-			}
-		}
-
-		for (int i = 0; i < MAX_SOCKETS && nfd > 0; i++)
-		{
-			if (FD_ISSET(sockets[i].id, &waitSend))
-			{
-				nfd--;
-				switch (sockets[i].send)
-				{
-				case SEND:
-					sendMessage(i);
-					break;
-				}
-			}
-		}
-	}
-
-	// Closing connections and Winsock.
-	cout << "Web Server: Closing Connection.\n";
-	closesocket(listenSocket);
-	WSACleanup();
+    // Closing connections and Winsock.
+    cout << "Web Server: Closing Connection.\n";
+    closesocket(listenSocket);
+    WSACleanup();
 }
 
 bool addSocket(SOCKET id, int what)
 {
-	for (int i = 0; i < MAX_SOCKETS; i++)
-	{
-		if (sockets[i].recv == EMPTY)
-		{
-			sockets[i].id = id;
-			sockets[i].recv = what;
-			sockets[i].send = IDLE;
-			sockets[i].len = 0;
-			socketsCount++;
-			return (true);
-		}
-	}
-	return (false);
+    for (int i = 0; i < MAX_SOCKETS; i++)
+    {
+        if (sockets[i].recv == EMPTY)
+        {
+            sockets[i].id = id;
+            sockets[i].recv = what;
+            sockets[i].send = IDLE;
+            sockets[i].len = 0;
+            sockets[i].lastIndex = 0; // Initialize lastIndex
+            socketsCount++;
+            return true;
+        }
+    }
+    return false;
 }
 
 void removeSocket(int index)
 {
-	sockets[index].recv = EMPTY;
-	sockets[index].send = EMPTY;
-	socketsCount--;
+    sockets[index].recv = EMPTY;
+    sockets[index].send = EMPTY;
+    sockets[index].lastIndex = 0; // Reset lastIndex
+    socketsCount--;
 }
 
 void acceptConnection(int index)
 {
-	SOCKET id = sockets[index].id;
-	struct sockaddr_in from;		// Address of sending partner
-	int fromLen = sizeof(from);
+    SOCKET id = sockets[index].id;
+    struct sockaddr_in from;
+    int fromLen = sizeof(from);
 
-	SOCKET msgSocket = accept(id, (struct sockaddr*)&from, &fromLen);
-	if (INVALID_SOCKET == msgSocket)
-	{
-		cout << "Web Server: Error at accept(): " << WSAGetLastError() << endl;
-		return;
-	}
-	cout << "Web Server: Client " << inet_ntoa(from.sin_addr) << ":" << ntohs(from.sin_port) << " is connected." << endl;
+    SOCKET msgSocket = accept(id, (struct sockaddr*)&from, &fromLen);
+    if (INVALID_SOCKET == msgSocket)
+    {
+        cout << "Web Server: Error at accept(): " << WSAGetLastError() << endl;
+        return;
+    }
+    cout << "Web Server: Client " << inet_ntoa(from.sin_addr) << ":" << ntohs(from.sin_port) << " is connected." << endl;
 
-	//
-	// Set the socket to be in non-blocking mode.
-	//
-	unsigned long flag = 1;
-	if (ioctlsocket(msgSocket, FIONBIO, &flag) != 0)
-	{
-		cout << "Web Server: Error at ioctlsocket(): " << WSAGetLastError() << endl;
-	}
+    unsigned long flag = 1;
+    if (ioctlsocket(msgSocket, FIONBIO, &flag) != 0)
+    {
+        cout << "Web Server: Error at ioctlsocket(): " << WSAGetLastError() << endl;
+    }
 
-	if (addSocket(msgSocket, RECEIVE) == false)
-	{
-		cout << "\t\tToo many connections, dropped!\n";
-		closesocket(id);
-	}
-	return;
+    if (addSocket(msgSocket, RECEIVE) == false)
+    {
+        cout << "\t\tToo many connections, dropped!\n";
+        closesocket(id);
+    }
+    return;
 }
 
 void receiveMessage(int index)
 {
-	SOCKET msgSocket = sockets[index].id;
+    SOCKET msgSocket = sockets[index].id;
 
-	int bytesRecv = recv(msgSocket, sockets[index].buffer, sizeof(sockets[index].buffer) - 1, 0);
+    int availableBufferSpace = sizeof(sockets[index].buffer) - sockets[index].lastIndex - 1;
 
-	if (SOCKET_ERROR == bytesRecv)
-	{
-		std::cout << "Web Server: Error at recv(): " << WSAGetLastError() << std::endl;
-		closesocket(msgSocket);
-		removeSocket(index);
-		return;
-	}
-	if (bytesRecv == 0)
-	{
-		closesocket(msgSocket);
-		removeSocket(index);
-		return;
-	}
-	else
-	{
-		sockets[index].buffer[bytesRecv] = '\0'; // Add null-terminator to make it a string
-		std::cout << "Web Server: Received: " << bytesRecv << " bytes of \"" << sockets[index].buffer << "\" message.\n";
+    int bytesRecv = recv(msgSocket, sockets[index].buffer + sockets[index].lastIndex, availableBufferSpace, 0);
 
-		// Extract the request line
-		char* requestLine = strtok(sockets[index].buffer, "\r\n");
-		if (requestLine != nullptr)
-		{
-			char method[8];
-			char url[128];
-			char version[16];
+    if (SOCKET_ERROR == bytesRecv)
+    {
+        std::cout << "Web Server: Error at recv(): " << WSAGetLastError() << std::endl;
+        closesocket(msgSocket);
+        removeSocket(index);
+        return;
+    }
+    if (bytesRecv == 0)
+    {
+        closesocket(msgSocket);
+        removeSocket(index);
+        return;
+    }
+    else
+    {
+        sockets[index].lastIndex += bytesRecv;
+        sockets[index].buffer[sockets[index].lastIndex] = '\0';
 
-			// Parse the request line
-			sscanf(requestLine, "%s %s %s", method, url, version);
+        std::cout << "Web Server: Received: " << bytesRecv << " bytes of \"" << &sockets[index].buffer[sockets[index].lastIndex - bytesRecv] << "\" message.\n";
 
-			std::cout << "Web Server: Method: " << method << ", URL: " << url << ", Version: " << version << std::endl;
+        char* requestLineEnd = strstr(sockets[index].buffer, "\r\n");
+        if (requestLineEnd != nullptr)
+        {
+            *requestLineEnd = '\0';
+            char requestLine[256];
+            strcpy(requestLine, sockets[index].buffer);
+            *requestLineEnd = '\r';
 
-			// Check the method and set the sendSubType accordingly
-			if (strcmp(method, "OPTIONS") == 0)
-			{
-				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::OPTIONS;
-			}
-			else if (strcmp(method, "GET") == 0)
-			{
-				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::GET;
+            char method[8];
+            char url[128];
+            char version[16];
 
-				// Extract the query string from the URL
-				char* queryString = strchr(url, '?');
-				char lang[32] = "en"; // Default to "en"
-				if (queryString != nullptr)
-				{
-					queryString++; // Move to the query string part
+            sscanf(requestLine, "%s %s %s", method, url, version);
 
-					// Parse the query string to find the "lang" parameter
-					char* token = strtok(queryString, "&");
-					while (token != nullptr)
-					{
-						if (strncmp(token, "lang=", 5) == 0)
-						{
-							strcpy(lang, token + 5);
-							break;
-						}
-						token = strtok(nullptr, "&");
-					}
-					std::cout << "Web Server: Path: " << url << ", Query: " << queryString << ", Lang: " << lang << std::endl;
-				}
-				else
-				{
-					std::cout << "Web Server: Path: " << url << ", No Query" << std::endl;
-				}
+            std::cout << "Web Server: Method: " << method << ", URL: " << url << ", Version: " << version << std::endl;
 
-				// Pass the lang parameter to the buffer for later use in sendMessage
-				sockets[index].len = sprintf(sockets[index].buffer, "lang=%s", lang);
-			}
-			else if (strcmp(method, "HEAD") == 0)
-			{
-				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::HEAD;
-			}
-			else if (strcmp(method, "POST") == 0)
-			{
-				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::POST;
-			}
-			else if (strcmp(method, "PUT") == 0)
-			{
-				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::PUT;
-			}
-			else if (strcmp(method, "DELETE") == 0)
-			{
-				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::DELETE;
-			}
-			else if (strcmp(method, "TRACE") == 0)
-			{
-				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::TRACE;
-			}
-			else if (strcmp(method, "Exit") == 0)
-			{
-				closesocket(msgSocket);
-				removeSocket(index);
-				return;
-			}
-		}
-	}
+            if (strcmp(method, "OPTIONS") == 0)
+            {
+                sockets[index].send = SEND;
+                sockets[index].sendSubType = HTTPRequestTypes::OPTIONS;
+            }
+            else if (strcmp(method, "GET") == 0)
+            {
+                sockets[index].send = SEND;
+                sockets[index].sendSubType = HTTPRequestTypes::GET;
+
+                char* queryString = strchr(url, '?');
+                char lang[32] = "en";
+                if (queryString != nullptr)
+                {
+                    queryString++;
+                    char* token = strtok(queryString, "&");
+                    while (token != nullptr)
+                    {
+                        if (strncmp(token, "lang=", 5) == 0)
+                        {
+                            strcpy(lang, token + 5);
+                            break;
+                        }
+                        token = strtok(nullptr, "&");
+                    }
+                    std::cout << "Web Server: Path: " << url << ", Query: " << queryString << ", Lang: " << lang << std::endl;
+                }
+                else
+                {
+                    std::cout << "Web Server: Path: " << url << ", No Query" << std::endl;
+                }
+
+                sockets[index].len = sprintf(sockets[index].buffer, "lang=%s", lang);
+            }
+            else if (strcmp(method, "HEAD") == 0)
+            {
+                sockets[index].send = SEND;
+                sockets[index].sendSubType = HTTPRequestTypes::HEAD;
+            }
+            else if (strcmp(method, "POST") == 0)
+            {
+                sockets[index].send = SEND;
+                sockets[index].sendSubType = HTTPRequestTypes::POST;
+
+                char* body = strstr(requestLineEnd + 2, "\r\n\r\n");
+                if (body != nullptr)
+                {
+                    body += 4;
+                    std::cout << "Web Server: POST Body: " << body << std::endl;
+                    strcpy(sockets[index].buffer, body);
+                }
+            }
+            else if (strcmp(method, "PUT") == 0)
+            {
+                sockets[index].send = SEND;
+                sockets[index].sendSubType = HTTPRequestTypes::PUT;
+
+                char* body = strstr(requestLineEnd + 2, "\r\n\r\n");
+                if (body != nullptr)
+                {
+                    body += 4;
+                    std::cout << "Web Server: PUT Body: " << body << std::endl;
+                    strcpy(sockets[index].buffer, body);
+                }
+            }
+            else if (strcmp(method, "DELETE") == 0)
+            {
+                sockets[index].send = SEND;
+                sockets[index].sendSubType = HTTPRequestTypes::DELETE;
+            }
+            else if (strcmp(method, "TRACE") == 0)
+            {
+                sockets[index].send = SEND;
+                sockets[index].sendSubType = HTTPRequestTypes::TRACE;
+            }
+            else if (strcmp(method, "Exit") == 0)
+            {
+                closesocket(msgSocket);
+                removeSocket(index);
+                return;
+            }
+
+            int remainingDataLength = sockets[index].lastIndex - (requestLineEnd - sockets[index].buffer) - 2;
+            if (remainingDataLength > 0)
+            {
+                memmove(sockets[index].buffer, requestLineEnd + 2, remainingDataLength);
+            }
+            sockets[index].lastIndex = remainingDataLength;
+        }
+    }
 }
 
 void sendMessage(int index)
 {
-	int bytesSent = 0;
-	char sendBuff[512];
+    int bytesSent = 0;
+    char sendBuff[512];
 
-	SOCKET msgSocket = sockets[index].id;
-	if (sockets[index].sendSubType == HTTPRequestTypes::OPTIONS)
-	{
-		optionsCommand(sendBuff, bytesSent);
-	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::GET) {
-		getCommand(sendBuff, bytesSent, sockets[index]);
-	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::HEAD) {
-		headCommand(sendBuff, bytesSent);
-	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::POST) { 
-		postCommand(sendBuff, bytesSent, sockets[index].buffer);//הוספתי את תוכן הבקשה כפרמטר שאותו השרת ידפיס
-	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::PUT) {
-		putCommand(sendBuff, bytesSent);
-	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::DELETE) {
-		deleteCommand(sendBuff, bytesSent);
-	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::TRACE) {
-		traceCommand(sendBuff, bytesSent);
-	}
+    SOCKET msgSocket = sockets[index].id;
+    if (sockets[index].sendSubType == HTTPRequestTypes::OPTIONS)
+    {
+        optionsCommand(sendBuff, bytesSent);
+    }
+    else if (sockets[index].sendSubType == HTTPRequestTypes::GET)
+    {
+        getCommand(sendBuff, bytesSent, sockets[index]);
+    }
+    else if (sockets[index].sendSubType == HTTPRequestTypes::HEAD)
+    {
+        headCommand(sendBuff, bytesSent);
+    }
+    else if (sockets[index].sendSubType == HTTPRequestTypes::POST)
+    {
+        postCommand(sendBuff, bytesSent, sockets[index].buffer);
+    }
+    else if (sockets[index].sendSubType == HTTPRequestTypes::PUT)
+    {
+        putCommand(sendBuff, bytesSent, sockets[index].buffer);
+    }
+    else if (sockets[index].sendSubType == HTTPRequestTypes::DELETE)
+    {
+        deleteCommand(sendBuff, bytesSent);
+    }
+    else if (sockets[index].sendSubType == HTTPRequestTypes::TRACE)
+    {
+        traceCommand(sendBuff, bytesSent, sockets[index]);
+    }
 
-	bytesSent = send(msgSocket, sendBuff, (int)strlen(sendBuff), 0);
-	if (SOCKET_ERROR == bytesSent)
-	{
-		cout << "Web Server: Error at send(): " << WSAGetLastError() << endl;
-		return;
-	}
+    bytesSent = send(msgSocket, sendBuff, (int)strlen(sendBuff), 0);
+    if (SOCKET_ERROR == bytesSent)
+    {
+        cout << "Web Server: Error at send(): " << WSAGetLastError() << endl;
+        return;
+    }
 
-	cout << "Web Server: Sent: " << bytesSent << "\\" << strlen(sendBuff) << " bytes of \"" << sendBuff << "\" message.\n";
+    cout << "Web Server: Sent: " << bytesSent << "\\" << strlen(sendBuff) << " bytes of \"" << sendBuff << "\" message.\n";
 
-	sockets[index].send = IDLE;
+    sockets[index].send = IDLE;
+
+    // Reset lastIndex after sending the response
+    sockets[index].lastIndex = 0;
 }
 
-
-// פונקציה שיוצרת כותרת לתגובה HTTP
-void makeHeader(string& response, string status, string contentType) {
-
-	response = "HTTP/1.1 " + status + lineSuffix;
-	response += "Server: HTTP Web Server" + lineSuffix;
-	response += "Content-Type: " + contentType + lineSuffix;
+void makeHeader(string& response, string status, string contentType)
+{
+    response = "HTTP/1.1 " + status + lineSuffix;
+    response += "Server: HTTP Web Server" + lineSuffix;
+    response += "Content-Type: " + contentType + lineSuffix;
 }
 
-// פונקציה שיוצרת גוף לתגובה HTTP
-void makeBody(string& response, string body) {
-	response += "Content-Length: " + to_string(body.length()) + lineSuffix + lineSuffix;
-	response += body;
+void makeBody(string& response, string body)
+{
+    response += "Content-Length: " + to_string(body.length()) + lineSuffix + lineSuffix;
+    response += body;
 }
 
+void GetMethodHandler(string& response, string& socketBuffer, const char* queryString = nullptr)
+{
+    string status = "200 OK";
+    string resourcePath = "/index.html";
+    string contentType = "text/html";
+    string HTMLContent;
 
-void GetMethodHandler(string& response, string& socketBuffer, const char* queryString = nullptr) {
-	string status = "200 OK";
-	string resourcePath = "/index.html"; 
-	string contentType = "text/html";
-	string HTMLContent;
+    if (queryString != nullptr)
+    {
+        const char* langParam = strstr(queryString, "lang=");
+        if (langParam != nullptr)
+        {
+            langParam += 5;
+            if (strncmp(langParam, "he", 2) == 0)
+                HTMLContent = "<html><body><h1>!שלום עולם</h1></body></html>";
+            else if (strncmp(langParam, "fr", 2) == 0)
+                HTMLContent = "<html><body><h1>Bonjour le monde!</h1></body></html>";
+            else
+                HTMLContent = "<html><body><h1>Hello World!</h1></body></html>";
+        }
+    }
 
-	// Check if query string contains "lang" parameter
-	if (queryString != nullptr) {
-		const char* langParam = strstr(queryString, "lang=");
-		if (langParam != nullptr) {
-			langParam += 5; // Move to the beginning of language code
-			if (strncmp(langParam, "he", 2) == 0)
-				HTMLContent = "<html><body><h1>!שלום עולם</h1></body></html>";
-			else if (strncmp(langParam, "fr", 2) == 0)
-				HTMLContent = "<html><body><h1>Bonjour le monde!</h1></body></html>";
-			else //en + default
-				HTMLContent = "<html><body><h1>Hello World!</h1></body></html>";
-		}
-	}
-	//אם הדיפולט לא עובד
-	//if (HTMLContent.empty())// If language parameter not provided or invalid, default to English
-	//	HTMLContent = "<html><body><h1>Hello, World!</h1></body></html>";
-
-	makeHeader(response, status, contentType);
-	makeBody(response, HTMLContent);
+    makeHeader(response, status, contentType);
+    makeBody(response, HTMLContent);
 }
 
-// פונקציה שמטפלת בבקשת HEAD
-void HeadMethodHandler(string& response, string& socketBuffer) { // כעיקרון האד לא מחזירה בודי, צריך להבין מה לעשות פה
-	GetMethodHandler(response, socketBuffer);
-	//HTTP / 1.1 200 OK // התגובה אמורה להראות ככה 
- //   Content - Type: text / html
-		
+void HeadMethodHandler(string& response, string& socketBuffer)
+{
+    GetMethodHandler(response, socketBuffer);
 }
 
-// פונקציה שמטפלת בבקשת OPTIONS
-//void OptionsMethodHandler(string& response) {
-//	string status = "204 no content";
-//	string contentType = "text/html";
-//
-//	makeHeader(response, status, contentType);
-//	response += "Supported methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
-//}
 void OptionsMethodHandler(string& response)
 {
-	string status = "200 OK";
-	string contentType = "text/html";
-	string body = "Supported methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE";
+    string status = "200 OK";
+    string contentType = "text/html";
+    string body = "Supported methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE";
 
-	// Create the response header
-	response = "HTTP/1.1 " + status + lineSuffix;
-	response += "Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
-	response += "Content-Type: " + contentType + lineSuffix;
-	response += "Content-Length: " + to_string(body.length()) + lineSuffix + lineSuffix;
-	response += body;
+    response = "HTTP/1.1 " + status + lineSuffix;
+    response += "Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
+    response += "Content-Type: " + contentType + lineSuffix;
+    response += "Content-Length: " + to_string(body.length()) + lineSuffix + lineSuffix;
+    response += body;
 }
 
+void NotAllowMethodHandler(string& response)
+{
+    string status = "405 Method Not Allowed";
+    string contentType = "text/html";
 
-// פונקציה שמטפלת בבקשות שאינן מותרות
-void NotAllowMethodHandler(string& response) {// לבדוק אם צריך
-	string status = "405 Method Not Allowed";
-	string contentType = "text/html";
-
-	makeHeader(response, status, contentType);
-	response += "Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
-	response += "Connection: close" + lineSuffix + lineSuffix;
+    makeHeader(response, status, contentType);
+    response += "Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
+    response += "Connection: close" + lineSuffix + lineSuffix;
 }
 
-// פונקציה שמטפלת בבקשת TRACE
-void TraceMethodHandler(string& response, string& socketBuffer) {
-	string status = "200 OK";
-	string contentType = "message/http";
-	string traceString = "TRACE " + socketBuffer;
+void TraceMethodHandler(string& response, string& socketBuffer)
+{
+    string status = "200 OK";
+    string contentType = "message/http";
+    string traceString = "TRACE " + socketBuffer;
 
-	makeHeader(response, status, contentType);
-	makeBody(response, traceString);
+    makeHeader(response, status, contentType);
+    makeBody(response, traceString);
 }
 
-// פונקציה שמטפלת בבקשת PUT
-void PutMethodHandler(string& response, string& socketBuffer) {
-	string status = "201 Created";
-	string contentType = "text/html";
-	string body = socketBuffer;
+void PutMethodHandler(string& response, const char* body)
+{
+    string status = "200 OK";
+    string contentType = "text/html";
+    string putBody = makePostBody(body);
 
-	makeHeader(response, status, contentType);
-	makeBody(response, body);
+    makeHeader(response, status, contentType);
+    makeBody(response, putBody);
 }
+
+string escapeHTML(const string& input)
+{
+    string output;
+    for (char c : input)
+    {
+        switch (c)
+        {
+        case '&': output += "&amp;"; break;
+        case '<': output += "&lt;"; break;
+        case '>': output += "&gt;"; break;
+        case '"': output += "&quot;"; break;
+        case '\'': output += "&apos;"; break;
+        default: output += c; break;
+        }
+    }
+    return output;
+}
+
 string makePostBody(const string& body)
 {
-	ostringstream htmlBody;
+    ostringstream htmlBody;
 
-	htmlBody << "<!DOCTYPE html>\n";
-	htmlBody << "<html>\n" << "<head>\n";
-	htmlBody << "<title>Post Method</title>\n";
-	htmlBody << "</head>\n" << "<body>\n";
-	htmlBody << "<h1>POST Succeded</h1>\n";
-	htmlBody << "<p>The Content is \"<a>" << body << " \"</a>.</p>\n";
-	htmlBody << "</body>\n" << "</html>\n";
+    string escapedBody = escapeHTML(body);
 
-	return htmlBody.str();
+    htmlBody << "<!DOCTYPE html>\n";
+    htmlBody << "<html>\n" << "<head>\n";
+    htmlBody << "<title>Post Method</title>\n";
+    htmlBody << "</head>\n" << "<body>\n";
+    htmlBody << "<h1>POST Succeeded</h1>\n";
+    htmlBody << "<p>The Content is \"" << escapedBody << "\".</p>\n";
+    htmlBody << "</body>\n" << "</html>\n";
+
+    return htmlBody.str();
 }
 
-// פונקציה שמטפלת בבקשת POST
-void PostMethodHandler(string& response, string& socketBuffer, const char* body) {
-	string status = "201 Created";
-	string contentType = "text/html";
-	string postBody = makePostBody(body); //אמור להכניס לבודי את תוכן הבקשה - צריכים להניח שזה סטרינג
-	
-	makeHeader(response, status, contentType);
-	makeBody(response, postBody);
+void PostMethodHandler(string& response, const char* body)
+{
+    string status = "200 OK";
+    string contentType = "text/html";
+    string postBody = makePostBody(body);
+
+    makeHeader(response, status, contentType);
+    makeBody(response, postBody);
 }
 
+void DeleteMethodHandler(string& response, string& socketBuffer)
+{
+    string status = "200 OK";
+    string contentType = "text/html";
+    string body = "<html><body><h1>Resource Deleted Successfully</h1></body></html>";
 
-// פונקציה שמטפלת בבקשת DELETE
-void DeleteMethodHandler(string& response, string& socketBuffer) {
-	string status = "200 OK";
-	string contentType = "text/html";
-	string body = "<html><body><h1>Resource Deleted Successfully</h1></body></html>";
-
-	makeHeader(response, status, contentType);
-	makeBody(response, body);
+    makeHeader(response, status, contentType);
+    makeBody(response, body);
 }
 
-void getCommand(char* sendBuff, int& bytesSent, SocketState curSocket) {
-	string response;
-	string socketBuffer = "GET /index.html HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
-	GetMethodHandler(response, socketBuffer, curSocket.buffer);
-	bytesSent = response.size();
-	strcpy(sendBuff, response.c_str());
+void getCommand(char* sendBuff, int& bytesSent, SocketState curSocket)
+{
+    string response;
+    string socketBuffer = "GET /index.html HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
+    GetMethodHandler(response, socketBuffer, curSocket.buffer);
+    bytesSent = response.size();
+    strcpy(sendBuff, response.c_str());
 }
 
-void headCommand(char* sendBuff, int& bytesSent) {
-	string response;
-	string socketBuffer = "HEAD /index.html HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
-	HeadMethodHandler(response, socketBuffer);
-	bytesSent = response.size();
-	strcpy(sendBuff, response.c_str());
+void headCommand(char* sendBuff, int& bytesSent)
+{
+    string response;
+    string socketBuffer = "HEAD /index.html HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
+    HeadMethodHandler(response, socketBuffer);
+    bytesSent = response.size();
+    strcpy(sendBuff, response.c_str());
 }
 
-void postCommand(char* sendBuff, int& bytesSent, const char* body) {
-	string response;
-	string Buffer = "POST /create HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\nTest file content";
-	PostMethodHandler(response, Buffer, body);
-	bytesSent = response.size();
-	strcpy(sendBuff, response.c_str());
+void putCommand(char* sendBuff, int& bytesSent, const char* body)
+{
+    string response;
+    PutMethodHandler(response, body);
+    bytesSent = response.size();
+    strcpy(sendBuff, response.c_str());
 }
 
-void optionsCommand(char* sendBuff, int& bytesSent) {
-	string response;
-	OptionsMethodHandler(response); 
-	bytesSent = response.size();
-	strcpy(sendBuff, response.c_str());
-	
+void optionsCommand(char* sendBuff, int& bytesSent)
+{
+    string response;
+    OptionsMethodHandler(response);
+    bytesSent = response.size();
+    strcpy(sendBuff, response.c_str());
 }
 
-void putCommand(char* sendBuff, int& bytesSent) {
-	string response;
-	string socketBuffer = "PUT /create HTTP/1.1\r\nHost: localhost\r\nAccept: text/htm\r\n\r\nTest file content";
-	PutMethodHandler(response, socketBuffer);
-	bytesSent = response.size();
-	strcpy(sendBuff, response.c_str());
+void postCommand(char* sendBuff, int& bytesSent, const char* body)
+{
+    string response;
+    PostMethodHandler(response, body);
+    bytesSent = response.size();
+    strcpy(sendBuff, response.c_str());
 }
 
-void deleteCommand(char* sendBuff, int& bytesSent) {
-	string response;
-	string socketBuffer = "DELETE /resource HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
-	DeleteMethodHandler(response, socketBuffer);
-	bytesSent = response.size();
-	strcpy(sendBuff, response.c_str());
+void deleteCommand(char* sendBuff, int& bytesSent)
+{
+    string response;
+    string socketBuffer = "DELETE /resource HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
+    DeleteMethodHandler(response, socketBuffer);
+    bytesSent = response.size();
+    strcpy(sendBuff, response.c_str());
 }
 
-void traceCommand(char* sendBuff, int& bytesSent) {
-	string response;
-	string socketBuffer = "TRACE /index.html HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
-	TraceMethodHandler(response, socketBuffer);
-	bytesSent = response.size();
-	strcpy(sendBuff, response.c_str());
+void traceCommand(char* sendBuff, int& bytesSent, SocketState socket)
+{
+    string response;
+    string socketBuffer = "TRACE /index.html HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
+    TraceMethodHandler(response, socketBuffer);
+    bytesSent = response.size();
+    strcpy(sendBuff, response.c_str());
 }
-
-
-
-//void optionsCommand(char* sendBuff, int& bytesSent) { // מבקשת מידע על הפעולות האפשריות על האובייקט
-//	const char* response = "<html><body><h1>Supported methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE</h1></body></html>";
-//	bytesSent = strlen(response);
-//	memcpy(sendBuff, response, bytesSent);
-//}
-//
-//
-//void getCommand(char* sendBuff, int& bytesSent, const char* queryString) { // קוראת את האובייקט
-//	const char* lang = "en"; // Default language
-//	const char* content = "Hello World!"; // Default content
-//
-//	if (queryString != nullptr) {
-//		const char* langParam = strstr(queryString, "lang=");
-//		if (langParam != nullptr) {
-//			langParam += 5; // Move to the beginning of language code
-//			if (strncmp(langParam, "he", 2) == 0)
-//				lang = "he";
-//			else if (strncmp(langParam, "fr", 2) == 0)
-//				lang = "fr";
-//		}
-//	}
-//
-//	if (strcmp(lang, "he") == 0)
-//		content = "שלום עולם";
-//	else if (strcmp(lang, "fr") == 0)
-//		content = "Bonjour le monde!";
-//
-//	const char* responseTemplate = "<html><body><h1>%s</h1></body></html>";//need to check if %s works
-//	int contentLength = strlen(content) + strlen(responseTemplate) - 2;
-//	char* response = new char[contentLength];
-//	snprintf(response, contentLength, responseTemplate, content); //מחבר את הכל
-//	bytesSent = strlen(response);
-//	memcpy(sendBuff, response, bytesSent);
-//	delete[] response;//לא בטוח
-//}
-//
-//void headCommand(char* sendBuff, int& bytesSent) {// Implementation for HEAD command
-//	const char* response = "<html><body>Response for HEAD command</body></html>";
-//	bytesSent = strlen(response);
-//	memcpy(sendBuff, response, bytesSent);
-//}
-//
-//void postCommand(char* sendBuff, int& bytesSent, const char* body) {
-//	std::cout << "Received POST data: " << body << std::endl;
-//	const char* responseTemplate =
-//		"HTTP/1.1 200 OK\r\n"
-//		"Content-Type: text/html\r\n"
-//		"Content-Length: %d\r\n"
-//		"\r\n"
-//		"<html><body>Received POST data: %s</body></html>";
-//	int contentLength = strlen(body) + strlen("<html><body>Received POST data: </body></html>");
-//	sprintf(sendBuff, responseTemplate, contentLength, body);
-//	bytesSent = strlen(sendBuff);
-//}
-//
-//void putCommand(char* sendBuff, int& bytesSent) {
-//	const char* response =
-//		"HTTP/1.1 200 OK\r\n"
-//		"Content-Type: text/html\r\n"
-//		"Content-Length: 24\r\n"
-//		"\r\n"
-//		"<html><body>OK</body></html>";
-//	strcpy(sendBuff, response);
-//	bytesSent = strlen(response);
-//}
-//
-//void deleteCommand(char* sendBuff, int& bytesSent) {
-//	const char* response =
-//		"HTTP/1.1 200 OK\r\n"
-//		"Content-Type: text/html\r\n"
-//		"Content-Length: 24\r\n"
-//		"\r\n"
-//		"<html><body>OK</body></html>";
-//	strcpy(sendBuff, response);
-//	bytesSent = strlen(response);
-//}
-//
-//void traceCommand(char* sendBuff, int& bytesSent, const char* receivedMessage) {
-//	const char* responseTemplate =
-//		"HTTP/1.1 200 OK\r\n"
-//		"Content-Type: text/html\r\n"
-//		"Content-Length: %d\r\n"
-//		"\r\n"
-//		"<html><body>%s</body></html>";
-//	int contentLength = strlen(receivedMessage) + strlen("<html><body></body></html>");
-//	sprintf(sendBuff, responseTemplate, contentLength, receivedMessage);
-//	bytesSent = strlen(sendBuff);
-//}
