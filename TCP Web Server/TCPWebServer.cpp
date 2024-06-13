@@ -11,10 +11,8 @@ using namespace std;
 #include <unordered_map>
 #include <sstream>
 #include <algorithm>
-#ifdef DELETE
-#undef DELETE
-#endif // DELETE
-
+#define MAX_SOCKETS 60
+#define TIME_PORT 27015
 
 struct SocketState sockets[MAX_SOCKETS] = { 0 };
 int socketsCount = 0;
@@ -242,443 +240,202 @@ void acceptConnection(int index)
 	return;
 }
 
-void receiveMessage(int index)
-{
+
+int readHeader(SocketState& state) {
+	char ch;
+	int bytesReceived;
+	int totalBytesReceived = 0;
+
+	while (!state.headerComplete) {
+		bytesReceived = recv(state.id, &ch, 1, 0);
+		if (bytesReceived == SOCKET_ERROR) {
+			std::cerr << "recv failed: " << WSAGetLastError() << std::endl;
+			return -1;
+		}
+		else if (bytesReceived == 0) {
+			return 0;
+		}
+
+		totalBytesReceived += bytesReceived;
+		state.header += ch;
+
+		if (state.header.size() >= 4 && state.header.substr(state.header.size() - 4) == lineSuffix + lineSuffix) {
+			state.headerComplete = true;
+		}
+	}
+
+	return totalBytesReceived;
+}
+
+int extractContentLength(SocketState& state) {
+	size_t contentLengthPos = state.header.find("Content-Length: ");
+	if (contentLengthPos != std::string::npos) {
+		contentLengthPos += 16;
+		size_t endPos = state.header.find(lineSuffix, contentLengthPos);
+		std::string contentLengthStr = state.header.substr(contentLengthPos, endPos - contentLengthPos);
+		state.contentLength = std::stoi(contentLengthStr);
+		return state.contentLength;
+	}
+	else {
+		std::cerr << "Content-Length header not found" << std::endl;
+		return -1;
+	}
+}
+
+int readBody(SocketState& state) {
+	int totalBytesReceived = 0;
+	int bytesReceived;
+
+	while (state.body.length() < static_cast<size_t>(state.contentLength)) {
+		char buffer[1024];
+		int toRead = std::min(state.contentLength - state.body.length(), static_cast<int>(sizeof(buffer)));
+		bytesReceived = recv(state.id, buffer, toRead, 0);
+		if (bytesReceived == SOCKET_ERROR) {
+			std::cerr << "recv failed: " << WSAGetLastError() << std::endl;
+			return -1;
+		}
+		else if (bytesReceived == 0) {
+			return 0;
+		}
+
+		totalBytesReceived += bytesReceived;
+		state.body.append(buffer, bytesReceived);
+	}
+
+	return totalBytesReceived;
+}
+
+int receiveOneMessage(SocketState& state) {
+	int totalBytesReceived = 0;
+
+	if (!state.headerComplete) {
+		int headerBytes = readHeader(state);
+		if (headerBytes <= 0) {
+			return headerBytes;
+		}
+		totalBytesReceived += headerBytes;
+
+		int contentLength = extractContentLength(state);
+		if (contentLength < 0) {
+			return -1;
+		}
+	}
+
+	int bodyBytes = readBody(state);
+	if (bodyBytes <= 0) {
+		return bodyBytes;
+	}
+	totalBytesReceived += bodyBytes;
+
+	state.buffer = state.header + state.body;
+	state.lastTimeUsed = std::time(nullptr);
+
+	return totalBytesReceived;
+}
+
+
+
+void receiveMessage(int index, SocketState* sockets) {
 	SOCKET msgSocket = sockets[index].id;
 
-	int bytesRecv = recv(msgSocket, sockets[index].buffer, sizeof(sockets[index].buffer) - 1, 0);
-
-	if (SOCKET_ERROR == bytesRecv)
-	{
-		std::cout << "Web Server: Error at recv(): " << WSAGetLastError() << std::endl;
+	int totalBytes = receiveOneMessage(sockets[index]);
+	if (totalBytes == -1) {
+		std::cout << "HTTP Server: Error at recv(): " << WSAGetLastError() << std::endl;
 		closesocket(msgSocket);
 		removeSocket(index);
 		return;
 	}
-	if (bytesRecv == 0)
-	{
+	if (totalBytes == 0) {
 		closesocket(msgSocket);
 		removeSocket(index);
 		return;
 	}
-	else
-	{
-		sockets[index].buffer[bytesRecv] = '\0'; // Add null-terminator to make it a string
-		std::cout << "Web Server: Received: " << bytesRecv << " bytes of \"" << sockets[index].buffer << "\" message.\n";
+	else {
+		std::cout << "HTTP Server: Received: " << totalBytes << " bytes of \"" << sockets[index].buffer << "\" message.\n";
 
-		// Extract the request line
-		char* requestLine = strtok(sockets[index].buffer, "\r\n");
-		if (requestLine != nullptr)
-		{
-			char method[8];
-			char url[128];
-			char version[16];
-
-			// Parse the request line
-			sscanf(requestLine, "%s %s %s", method, url, version);
-
-			std::cout << "Web Server: Method: " << method << ", URL: " << url << ", Version: " << version << std::endl;
-
-			// Check the method and set the sendSubType accordingly
-			if (strcmp(method, "OPTIONS") == 0)
-			{
+		if (sockets[index].buffer.length() > 0) {
+			if (strncmp(sockets[index].buffer.c_str(), "OPTIONS", 7) == 0) {
 				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::OPTIONS;
+				sockets[index].method = HTTPRequestTypes::OPTIONS;
 			}
-			else if (strcmp(method, "GET") == 0)
-			{
+			else if (strncmp(sockets[index].buffer.c_str(), "GET", 3) == 0) {
 				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::GET;
-
-				// Extract the query string from the URL
-				char* queryString = strchr(url, '?');
-				char lang[32] = "en"; // Default to "en"
-				if (queryString != nullptr)
-				{
-					queryString++; // Move to the query string part
-
-					// Parse the query string to find the "lang" parameter
-					char* token = strtok(queryString, "&");
-					while (token != nullptr)
-					{
-						if (strncmp(token, "lang=", 5) == 0)
-						{
-							strcpy(lang, token + 5);
-							break;
-						}
-						token = strtok(nullptr, "&");
-					}
-					std::cout << "Web Server: Path: " << url << ", Query: " << queryString << ", Lang: " << lang << std::endl;
-				}
-				else
-				{
-					std::cout << "Web Server: Path: " << url << ", No Query" << std::endl;
-				}
-
-				// Pass the lang parameter to the buffer for later use in sendMessage
-				sockets[index].len = sprintf(sockets[index].buffer, "lang=%s", lang);
+				sockets[index].method = HTTPRequestTypes::GET;
 			}
-			else if (strcmp(method, "HEAD") == 0)
-			{
+			else if (strncmp(sockets[index].buffer.c_str(), "HEAD", 4) == 0) {
 				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::HEAD;
+				sockets[index].method = HTTPRequestTypes::HEAD;
 			}
-			else if (strcmp(method, "POST") == 0)
-			{
+			else if (strncmp(sockets[index].buffer.c_str(), "POST", 4) == 0) {
 				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::POST;
+				sockets[index].method = HTTPRequestTypes::POST;
 			}
-			else if (strcmp(method, "PUT") == 0)
-			{
+			else if (strncmp(sockets[index].buffer.c_str(), "PUT", 3) == 0) {
 				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::PUT;
+				sockets[index].method = HTTPRequestTypes::PUT;
 			}
-			else if (strcmp(method, "DELETE") == 0)
-			{
+			else if (strncmp(sockets[index].buffer.c_str(), "DELETE", 6) == 0) {
 				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::DELETE_REQUEST;
+				sockets[index].method = HTTPRequestTypes::DELETE_REQUEST;
 			}
-			else if (strcmp(method, "TRACE") == 0)
-			{
+			else if (strncmp(sockets[index].buffer.c_str(), "TRACE", 5) == 0) {
 				sockets[index].send = SEND;
-				sockets[index].sendSubType = HTTPRequestTypes::TRACE;
+				sockets[index].method = HTTPRequestTypes::TRACE;
 			}
-			else if (strcmp(method, "Exit") == 0)
-			{
-				closesocket(msgSocket);
-				removeSocket(index);
-				return;
+			else {
+				sockets[index].send = SEND;
+				sockets[index].method = HTTPRequestTypes::NOT_ALLOWED;
 			}
 		}
 	}
 }
 
-void sendMessage(int index)
-{
+
+
+void sendMessage(int index, SocketState* sockets) {
 	int bytesSent = 0;
 	char sendBuff[512];
 
 	SOCKET msgSocket = sockets[index].id;
-	if (sockets[index].sendSubType == HTTPRequestTypes::OPTIONS)
-	{
-		optionsCommand(sendBuff, bytesSent);
+	if (sockets[index].method == HTTPRequestTypes::OPTIONS) {
+		optionsCommand(sendBuff, bytesSent, sockets[index].buffer);
 	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::GET) {
-		getCommand(sendBuff, bytesSent, sockets[index]);
+	else if (sockets[index].method == HTTPRequestTypes::GET) {
+		getCommand(sendBuff, bytesSent, sockets[index].buffer);
 	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::HEAD) {
-		headCommand(sendBuff, bytesSent);
+	else if (sockets[index].method == HTTPRequestTypes::HEAD) {
+		headCommand(sendBuff, bytesSent, sockets[index].buffer);
 	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::POST) { 
-		postCommand(sendBuff, bytesSent, sockets[index].buffer);//הוספתי את תוכן הבקשה כפרמטר שאותו השרת ידפיס
+	else if (sockets[index].method == HTTPRequestTypes::POST) {
+		postCommand(sendBuff, bytesSent, sockets[index].buffer);
 	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::PUT) {
-		putCommand(sendBuff, bytesSent);
+	else if (sockets[index].method == HTTPRequestTypes::PUT) {
+		putCommand(sendBuff, bytesSent, sockets[index].buffer);
 	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::DELETE_REQUEST) {
-		deleteCommand(sendBuff, bytesSent);
+	else if (sockets[index].method == HTTPRequestTypes::DELETE_REQUEST) {
+		deleteCommand(sendBuff, bytesSent, sockets[index].buffer);
 	}
-	else if (sockets[index].sendSubType == HTTPRequestTypes::TRACE) {
-		traceCommand(sendBuff, bytesSent);
+	else if (sockets[index].method == HTTPRequestTypes::TRACE) {
+		traceCommand(sendBuff, bytesSent, sockets[index].buffer);
 	}
-
-	bytesSent = send(msgSocket, sendBuff, (int)strlen(sendBuff), 0);
-	if (SOCKET_ERROR == bytesSent)
-	{
-		cout << "Web Server: Error at send(): " << WSAGetLastError() << endl;
+	else if (sockets[index].method == HTTPRequestTypes::NOT_ALLOWED) {
+		closesocket(msgSocket);
+		removeSocket(index);
 		return;
 	}
 
-	cout << "Web Server: Sent: " << bytesSent << "\\" << strlen(sendBuff) << " bytes of \"" << sendBuff << "\" message.\n";
+	bytesSent = send(msgSocket, sendBuff, (int)strlen(sendBuff), 0);
+	if (SOCKET_ERROR == bytesSent) {
+		std::cout << "Web Server: Error at send(): " << WSAGetLastError() << std::endl;
+		return;
+	}
+
+	std::cout << "Web Server: Sent: " << bytesSent << "\\" << strlen(sendBuff) << " bytes of \"" << sendBuff << "\" message.\n";
 
 	time_t currectTime;
 	time(&currectTime);
-	sockets[index].lastTimeUsed = currectTime; // update the last time used.
+	sockets[index].lastTimeUsed = currectTime;
 	sockets[index].send = IDLE;
 }
 
-//
-//// פונקציה שיוצרת כותרת לתגובה HTTP
-//void makeHeader(string& response, string status, string contentType) {
-//
-//	response = "HTTP/1.1 " + status + lineSuffix;
-//	response += "Server: HTTP Web Server" + lineSuffix;
-//	response += "Content-Type: " + contentType + lineSuffix;
-//}
-//
-//// פונקציה שיוצרת גוף לתגובה HTTP
-//void makeBody(string& response, string body) {
-//	response += "Content-Length: " + to_string(body.length()) + lineSuffix + lineSuffix;
-//	response += body;
-//}
-//
-//
-//void GetMethodHandler(string& response, string& socketBuffer, const char* queryString = nullptr) {
-//	string status = "200 OK";
-//	string resourcePath = "/index.html"; 
-//	string contentType = "text/html";
-//	string HTMLContent;
-//
-//	// Check if query string contains "lang" parameter
-//	if (queryString != nullptr) {
-//		const char* langParam = strstr(queryString, "lang=");
-//		if (langParam != nullptr) {
-//			langParam += 5; // Move to the beginning of language code
-//			if (strncmp(langParam, "he", 2) == 0)
-//				HTMLContent = "<html><body><h1>!שלום עולם</h1></body></html>";
-//			else if (strncmp(langParam, "fr", 2) == 0)
-//				HTMLContent = "<html><body><h1>Bonjour le monde!</h1></body></html>";
-//			else //en + default
-//				HTMLContent = "<html><body><h1>Hello World!</h1></body></html>";
-//		}
-//	}
-//	//אם הדיפולט לא עובד
-//	//if (HTMLContent.empty())// If language parameter not provided or invalid, default to English
-//	//	HTMLContent = "<html><body><h1>Hello, World!</h1></body></html>";
-//
-//	makeHeader(response, status, contentType);
-//	makeBody(response, HTMLContent);
-//}
-//
-//// פונקציה שמטפלת בבקשת HEAD
-//void HeadMethodHandler(string& response, string& socketBuffer) { // כעיקרון האד לא מחזירה בודי, צריך להבין מה לעשות פה
-//	GetMethodHandler(response, socketBuffer);
-//	//HTTP / 1.1 200 OK // התגובה אמורה להראות ככה 
-// //   Content - Type: text / html
-//		
-//}
-//
-//// פונקציה שמטפלת בבקשת OPTIONS
-////void OptionsMethodHandler(string& response) {
-////	string status = "204 no content";
-////	string contentType = "text/html";
-////
-////	makeHeader(response, status, contentType);
-////	response += "Supported methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
-////}
-//void OptionsMethodHandler(string& response)
-//{
-//	string status = "200 OK";
-//	string contentType = "text/html";
-//	string body = "Supported methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE";
-//
-//	// Create the response header
-//	response = "HTTP/1.1 " + status + lineSuffix;
-//	response += "Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
-//	response += "Content-Type: " + contentType + lineSuffix;
-//	response += "Content-Length: " + to_string(body.length()) + lineSuffix + lineSuffix;
-//	response += body;
-//}
-//
-//
-//// פונקציה שמטפלת בבקשות שאינן מותרות
-//void NotAllowMethodHandler(string& response) {// לבדוק אם צריך
-//	string status = "405 Method Not Allowed";
-//	string contentType = "text/html";
-//
-//	makeHeader(response, status, contentType);
-//	response += "Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE" + lineSuffix;
-//	response += "Connection: close" + lineSuffix + lineSuffix;
-//}
-//
-//// פונקציה שמטפלת בבקשת TRACE
-//void TraceMethodHandler(string& response, string& socketBuffer) {
-//	string status = "200 OK";
-//	string contentType = "message/http";
-//	string traceString = "TRACE " + socketBuffer;
-//
-//	makeHeader(response, status, contentType);
-//	makeBody(response, traceString);
-//}
-//
-//// פונקציה שמטפלת בבקשת PUT
-//void PutMethodHandler(string& response, string& socketBuffer) {
-//	string status = "201 Created";
-//	string contentType = "text/html";
-//	string body = socketBuffer;
-//
-//	makeHeader(response, status, contentType);
-//	makeBody(response, body);
-//}
-//string makePostBody(const string& body)
-//{
-//	ostringstream htmlBody;
-//
-//	htmlBody << "<!DOCTYPE html>\n";
-//	htmlBody << "<html>\n" << "<head>\n";
-//	htmlBody << "<title>Post Method</title>\n";
-//	htmlBody << "</head>\n" << "<body>\n";
-//	htmlBody << "<h1>POST Succeded</h1>\n";
-//	htmlBody << "<p>The Content is \"<a>" << body << " \"</a>.</p>\n";
-//	htmlBody << "</body>\n" << "</html>\n";
-//
-//	return htmlBody.str();
-//}
-//
-//// פונקציה שמטפלת בבקשת POST
-//void PostMethodHandler(string& response, string& socketBuffer, const char* body) {
-//	string status = "201 Created";
-//	string contentType = "text/html";
-//	string postBody = makePostBody(body); //אמור להכניס לבודי את תוכן הבקשה - צריכים להניח שזה סטרינג
-//	
-//	makeHeader(response, status, contentType);
-//	makeBody(response, postBody);
-//}
-//
-//
-//// פונקציה שמטפלת בבקשת DELETE
-//void DeleteMethodHandler(string& response, string& socketBuffer) {
-//	string status = "200 OK";
-//	string contentType = "text/html";
-//	string body = "<html><body><h1>Resource Deleted Successfully</h1></body></html>";
-//
-//	makeHeader(response, status, contentType);
-//	makeBody(response, body);
-//}
-//
-//void getCommand(char* sendBuff, int& bytesSent, SocketState curSocket) {
-//	string response;
-//	string socketBuffer = "GET /index.html HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
-//	GetMethodHandler(response, socketBuffer, curSocket.buffer);
-//	bytesSent = response.size();
-//	strcpy(sendBuff, response.c_str());
-//}
-//
-//void headCommand(char* sendBuff, int& bytesSent) {
-//	string response;
-//	string socketBuffer = "HEAD /index.html HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
-//	HeadMethodHandler(response, socketBuffer);
-//	bytesSent = response.size();
-//	strcpy(sendBuff, response.c_str());
-//}
-//
-//void postCommand(char* sendBuff, int& bytesSent, const char* body) {
-//	string response;
-//	string Buffer = "POST /create HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\nTest file content";
-//	PostMethodHandler(response, Buffer, body);
-//	bytesSent = response.size();
-//	strcpy(sendBuff, response.c_str());
-//}
-//
-//void optionsCommand(char* sendBuff, int& bytesSent) {
-//	string response;
-//	OptionsMethodHandler(response); 
-//	bytesSent = response.size();
-//	strcpy(sendBuff, response.c_str());
-//	
-//}
-//
-//void putCommand(char* sendBuff, int& bytesSent) {
-//	string response;
-//	string socketBuffer = "PUT /create HTTP/1.1\r\nHost: localhost\r\nAccept: text/htm\r\n\r\nTest file content";
-//	PutMethodHandler(response, socketBuffer);
-//	bytesSent = response.size();
-//	strcpy(sendBuff, response.c_str());
-//}
-//
-//void deleteCommand(char* sendBuff, int& bytesSent) {
-//	string response;
-//	string socketBuffer = "DELETE /resource HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
-//	DeleteMethodHandler(response, socketBuffer);
-//	bytesSent = response.size();
-//	strcpy(sendBuff, response.c_str());
-//}
-//
-//void traceCommand(char* sendBuff, int& bytesSent) {
-//	string response;
-//	string socketBuffer = "TRACE /index.html HTTP/1.1\r\nHost: localhost\r\nAccept: text/html\r\n\r\n";
-//	TraceMethodHandler(response, socketBuffer);
-//	bytesSent = response.size();
-//	strcpy(sendBuff, response.c_str());
-//}
-//
-//
-//
-////void optionsCommand(char* sendBuff, int& bytesSent) { // מבקשת מידע על הפעולות האפשריות על האובייקט
-////	const char* response = "<html><body><h1>Supported methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE</h1></body></html>";
-////	bytesSent = strlen(response);
-////	memcpy(sendBuff, response, bytesSent);
-////}
-////
-////
-////void getCommand(char* sendBuff, int& bytesSent, const char* queryString) { // קוראת את האובייקט
-////	const char* lang = "en"; // Default language
-////	const char* content = "Hello World!"; // Default content
-////
-////	if (queryString != nullptr) {
-////		const char* langParam = strstr(queryString, "lang=");
-////		if (langParam != nullptr) {
-////			langParam += 5; // Move to the beginning of language code
-////			if (strncmp(langParam, "he", 2) == 0)
-////				lang = "he";
-////			else if (strncmp(langParam, "fr", 2) == 0)
-////				lang = "fr";
-////		}
-////	}
-////
-////	if (strcmp(lang, "he") == 0)
-////		content = "שלום עולם";
-////	else if (strcmp(lang, "fr") == 0)
-////		content = "Bonjour le monde!";
-////
-////	const char* responseTemplate = "<html><body><h1>%s</h1></body></html>";//need to check if %s works
-////	int contentLength = strlen(content) + strlen(responseTemplate) - 2;
-////	char* response = new char[contentLength];
-////	snprintf(response, contentLength, responseTemplate, content); //מחבר את הכל
-////	bytesSent = strlen(response);
-////	memcpy(sendBuff, response, bytesSent);
-////	delete[] response;//לא בטוח
-////}
-////
-////void headCommand(char* sendBuff, int& bytesSent) {// Implementation for HEAD command
-////	const char* response = "<html><body>Response for HEAD command</body></html>";
-////	bytesSent = strlen(response);
-////	memcpy(sendBuff, response, bytesSent);
-////}
-////
-////void postCommand(char* sendBuff, int& bytesSent, const char* body) {
-////	std::cout << "Received POST data: " << body << std::endl;
-////	const char* responseTemplate =
-////		"HTTP/1.1 200 OK\r\n"
-////		"Content-Type: text/html\r\n"
-////		"Content-Length: %d\r\n"
-////		"\r\n"
-////		"<html><body>Received POST data: %s</body></html>";
-////	int contentLength = strlen(body) + strlen("<html><body>Received POST data: </body></html>");
-////	sprintf(sendBuff, responseTemplate, contentLength, body);
-////	bytesSent = strlen(sendBuff);
-////}
-////
-////void putCommand(char* sendBuff, int& bytesSent) {
-////	const char* response =
-////		"HTTP/1.1 200 OK\r\n"
-////		"Content-Type: text/html\r\n"
-////		"Content-Length: 24\r\n"
-////		"\r\n"
-////		"<html><body>OK</body></html>";
-////	strcpy(sendBuff, response);
-////	bytesSent = strlen(response);
-////}
-////
-////void deleteCommand(char* sendBuff, int& bytesSent) {
-////	const char* response =
-////		"HTTP/1.1 200 OK\r\n"
-////		"Content-Type: text/html\r\n"
-////		"Content-Length: 24\r\n"
-////		"\r\n"
-////		"<html><body>OK</body></html>";
-////	strcpy(sendBuff, response);
-////	bytesSent = strlen(response);
-////}
-////
-////void traceCommand(char* sendBuff, int& bytesSent, const char* receivedMessage) {
-////	const char* responseTemplate =
-////		"HTTP/1.1 200 OK\r\n"
-////		"Content-Type: text/html\r\n"
-////		"Content-Length: %d\r\n"
-////		"\r\n"
-////		"<html><body>%s</body></html>";
-////	int contentLength = strlen(receivedMessage) + strlen("<html><body></body></html>");
-////	sprintf(sendBuff, responseTemplate, contentLength, receivedMessage);
-////	bytesSent = strlen(sendBuff);
-////}
+
