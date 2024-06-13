@@ -4,18 +4,20 @@
 
 #include <iostream>
 #include <winsock2.h>
+#include <windows.h>
 #include <string>
 #include <unordered_map>
 #include <fstream>
-#include <filesystem>
+#include <direct.h> // For directory operations
 #include <ctime>
 #include <sstream>
+
 
 using namespace std;
 
 const int SOCKET_BUFFER_SIZE = 2048;
-const std::string DEFAULT_RESOURCE = "/index.html"; // default index
-const std::string RESOURCE_PATH = "/Resources"; // folder to create new files in for POST, change with PUT, and delete with DELETE
+const std::string DEFAULT_RESOURCE = "\\index.html"; // default index
+const std::string RESOURCE_PATH = "\\Resources"; // folder to create new files in for POST, change with PUT, and delete with DELETE
 const std::string lineSuffix = "\r\n";
 
 enum HTTPRequestTypes {
@@ -42,6 +44,16 @@ struct SocketState {
     bool headerComplete;    // Flag to check if header is complete
 };
 
+const int TIME_PORT = 27015;
+const int MAX_SOCKETS = 60;
+const int EMPTY = 0;
+const int LISTEN = 1;
+const int RECEIVE = 2;
+const int IDLE = 3;
+const int SEND = 4;
+const int SEND_TIME = 1;
+const int SEND_SECONDS = 2;
+
 void makeHeader(string& response, string status, string contentType);
 void makeBody(string& response, string body);
 void GetMethodHandler(string& response, const SocketState& state);
@@ -64,3 +76,4 @@ void traceCommand(char* sendBuff, int& bytesSent, const SocketState& state);
 
 const string getLanguageFromQuery(const string& buffer);
 const string getRequestBody(const string& buffer);
+void initializeBaseDirectory();

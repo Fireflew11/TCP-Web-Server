@@ -11,14 +11,25 @@ using namespace std;
 #include <unordered_map>
 #include <sstream>
 #include <algorithm>
-#define MAX_SOCKETS 60
-#define TIME_PORT 27015
+
 
 struct SocketState sockets[MAX_SOCKETS] = { 0 };
 int socketsCount = 0;
+bool addSocket(SOCKET id, int what);
+void removeSocket(int index);
+void acceptConnection(int index);
+int readHeader(SocketState& state);
+int extractContentLength(SocketState& state);
+int readBody(SocketState& state);
+int receiveOneMessage(SocketState& state);
+void receiveMessage(int index);
+void sendMessage(int index);
 
 void main()
 {
+	//initialize path
+	initializeBaseDirectory();
+
 	// Initialize Winsock (Windows Sockets).
 
 	// Create a WSADATA object called wsaData.
@@ -194,7 +205,6 @@ bool addSocket(SOCKET id, int what)
 			sockets[i].id = id;
 			sockets[i].recv = what;
 			sockets[i].send = IDLE;
-			sockets[i].len = 0;
 			socketsCount++;
 			return (true);
 		}
@@ -288,7 +298,7 @@ int readBody(SocketState& state) {
 
 	while (state.body.length() < static_cast<size_t>(state.contentLength)) {
 		char buffer[1024];
-		int toRead = std::min(state.contentLength - state.body.length(), static_cast<int>(sizeof(buffer)));
+		int toRead = min(state.contentLength - state.body.length(), static_cast<int>(sizeof(buffer)));
 		bytesReceived = recv(state.id, buffer, toRead, 0);
 		if (bytesReceived == SOCKET_ERROR) {
 			std::cerr << "recv failed: " << WSAGetLastError() << std::endl;
@@ -335,7 +345,7 @@ int receiveOneMessage(SocketState& state) {
 
 
 
-void receiveMessage(int index, SocketState* sockets) {
+void receiveMessage(int index) {
 	SOCKET msgSocket = sockets[index].id;
 
 	int totalBytes = receiveOneMessage(sockets[index]);
@@ -392,31 +402,31 @@ void receiveMessage(int index, SocketState* sockets) {
 
 
 
-void sendMessage(int index, SocketState* sockets) {
+void sendMessage(int index) {
 	int bytesSent = 0;
 	char sendBuff[512];
 
 	SOCKET msgSocket = sockets[index].id;
 	if (sockets[index].method == HTTPRequestTypes::OPTIONS) {
-		optionsCommand(sendBuff, bytesSent, sockets[index].buffer);
+		optionsCommand(sendBuff, bytesSent, sockets[index]);
 	}
 	else if (sockets[index].method == HTTPRequestTypes::GET) {
-		getCommand(sendBuff, bytesSent, sockets[index].buffer);
+		getCommand(sendBuff, bytesSent, sockets[index]);
 	}
 	else if (sockets[index].method == HTTPRequestTypes::HEAD) {
-		headCommand(sendBuff, bytesSent, sockets[index].buffer);
+		headCommand(sendBuff, bytesSent, sockets[index]);
 	}
 	else if (sockets[index].method == HTTPRequestTypes::POST) {
-		postCommand(sendBuff, bytesSent, sockets[index].buffer);
+		postCommand(sendBuff, bytesSent, sockets[index]);
 	}
 	else if (sockets[index].method == HTTPRequestTypes::PUT) {
-		putCommand(sendBuff, bytesSent, sockets[index].buffer);
+		putCommand(sendBuff, bytesSent, sockets[index]);
 	}
 	else if (sockets[index].method == HTTPRequestTypes::DELETE_REQUEST) {
-		deleteCommand(sendBuff, bytesSent, sockets[index].buffer);
+		deleteCommand(sendBuff, bytesSent, sockets[index]);
 	}
 	else if (sockets[index].method == HTTPRequestTypes::TRACE) {
-		traceCommand(sendBuff, bytesSent, sockets[index].buffer);
+		traceCommand(sendBuff, bytesSent, sockets[index]);
 	}
 	else if (sockets[index].method == HTTPRequestTypes::NOT_ALLOWED) {
 		closesocket(msgSocket);

@@ -1,8 +1,21 @@
 ﻿#include "httpCommands.h"
-#include <filesystem> // For filesystem operations
-#include <fstream>    // For file stream operations
+#include <direct.h>  // For _mkdir
+#include <fstream>   // For file stream operations
+#include <ctime>     // For time operations
 
-namespace fs = std::filesystem; // Alias for easier usage
+static std::string baseDirectory;
+
+void initializeBaseDirectory() {
+    wchar_t wCurrentPath[MAX_PATH];
+    if (GetCurrentDirectoryW(MAX_PATH, wCurrentPath)) {
+        // Convert wide string to a regular string
+        char currentPath[MAX_PATH];
+        wcstombs(currentPath, wCurrentPath, MAX_PATH);
+        baseDirectory = std::string(currentPath);
+    }
+}
+
+
 
 void makeHeader(string& response, string status, string contentType) {
     response = "HTTP/1.1 " + status + lineSuffix;
@@ -91,31 +104,40 @@ string makePostBody(const string& body) {
 }
 
 void PostMethodHandler(string& response, const SocketState& state) {
+    std::string filename = std::to_string(std::time(nullptr)) + ".txt";
+    std::string dirPath = baseDirectory + "\\" + RESOURCE_PATH;
+    std::string filePath = dirPath + "\\" + filename;
+
     string status = "201 Created";
     string contentType = "text/html";
-    string postBody = makePostBody(state.body);
+    string postBody = makePostBody(filename);
 
     // Generate a unique filename based on the current time
-    std::string filename = std::to_string(std::time(nullptr)) + ".txt";
-    std::string filePath = fs::current_path().string() + RESOURCE_PATH + "/" + filename;
-
+    
     // Ensure the Resources directory exists
-    fs::create_directories(fs::current_path() / RESOURCE_PATH);
-
-    // Write the body content to a new file
-    std::ofstream outFile(filePath);
-    if (outFile.is_open()) {
-        outFile << state.body;
-        outFile.close();
+    if (_mkdir(dirPath.c_str()) != 0 && errno != EEXIST) {
+        status = "500 Internal Server Error";
+        postBody = "<html><body><h1>Failed to create directory</h1></body></html>";
     }
     else {
-        status = "500 Internal Server Error";
-        postBody = "<html><body><h1>Failed to create file</h1></body></html>";
+        // Write the body content to a new file
+        FILE* outFile = fopen(filePath.c_str(), "w");
+        if (outFile != nullptr) {
+            fwrite(state.body.c_str(), sizeof(char), state.body.size(), outFile);
+            fclose(outFile);
+            std::cout << "File created successfully: " << filePath << std::endl; // Debug output
+        }
+        else {
+            status = "500 Internal Server Error";
+            postBody = "<html><body><h1>Failed to create file</h1></body></html>";
+            std::cout << "Failed to open file: " << filePath << std::endl; // Debug output
+        }
     }
 
     makeHeader(response, status, contentType);
     makeBody(response, postBody);
 }
+
 
 
 void DeleteMethodHandler(string& response, const SocketState& state) {
