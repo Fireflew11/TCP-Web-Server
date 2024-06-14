@@ -2,6 +2,7 @@
 #include <direct.h>  // For _mkdir
 #include <fstream>   // For file stream operations
 #include <ctime>     // For time operations
+#include <io.h>
 
 static std::string baseDirectory;
 
@@ -83,20 +84,59 @@ void NotAllowMethodHandler(string& response, const SocketState& state) {
 void TraceMethodHandler(string& response, const SocketState& state) {
     string status = "200 OK";
     string contentType = "message/http";
-    string traceString = "TRACE " + state.buffer;
+    string traceString = state.buffer;
 
     makeHeader(response, status, contentType);
     makeBody(response, traceString);
 }
 
 void PutMethodHandler(string& response, const SocketState& state) {
-    string status = "201 Created";
+    string status;
     string contentType = "text/html";
-    string body = state.buffer;
+    std::string resourcePath = state.buffer.substr(0, state.buffer.find("\r\n")); // Assuming the first line of buffer contains the URL path
+
+    // Extract the file name from the request URL
+    size_t start = resourcePath.find(" ") + 2;
+    size_t end = resourcePath.find(" ", start);
+
+    if (start >= resourcePath.length() || end == std::string::npos || start == end) {
+        // No file name found in the URL
+        status = "404 Not Found";
+        response = "<html><body><h1>File not found</h1></body></html>";
+    }
+    else {
+        std::string filePath = baseDirectory + RESOURCE_PATH + "\\" + resourcePath.substr(start, end - start);
+
+        // Check if the file exists
+        bool fileExists = (_access(filePath.c_str(), 0) != -1);
+
+        // Print the body to the server's console
+        std::cout << "PUT request body: " << state.body << std::endl;
+
+        // Write the body content to the file (append mode)
+        FILE* outFile = fopen(filePath.c_str(), "a");
+        if (outFile != nullptr) {
+            fwrite(state.body.c_str(), sizeof(char), state.body.size(), outFile);
+            fwrite("\n", sizeof(char), 1, outFile);
+            fclose(outFile);
+
+            if (fileExists) {
+                status = "200 OK";
+            }
+            else {
+                status = "201 Created";
+            }
+        }
+        else {
+            status = "500 Internal Server Error";
+            response = "<html><body><h1>Failed to update file</h1></body></html>";
+        }
+    }
 
     makeHeader(response, status, contentType);
-    makeBody(response, body);
+    makeBody(response, response);
 }
+
 
 string makePostBody(const string& body) {
     ostringstream htmlBody;
@@ -132,6 +172,7 @@ void PostMethodHandler(string& response, const SocketState& state) {
         FILE* outFile = fopen(filePath.c_str(), "w");
         if (outFile != nullptr) {
             fwrite(state.body.c_str(), sizeof(char), state.body.size(), outFile);
+            fwrite("\n", sizeof(char), 1, outFile);
             fclose(outFile);
             std::cout << "File created successfully: " << filePath << std::endl; // Debug output
         }
@@ -149,12 +190,43 @@ void PostMethodHandler(string& response, const SocketState& state) {
 
 
 void DeleteMethodHandler(string& response, const SocketState& state) {
-    string status = "200 OK";
+    string status;
     string contentType = "text/html";
-    string body = "<html><body><h1>Resource Deleted Successfully</h1></body></html>";
+    std::string resourcePath = state.buffer.substr(0, state.buffer.find("\r\n")); // Assuming the first line of buffer contains the URL path
+
+    // Extract the file name from the request URL
+    size_t start = resourcePath.find(" ") + 2;
+    size_t end = resourcePath.find(" ", start);
+
+    if (start >= resourcePath.length() || end == std::string::npos || start == end) {
+        // No file name found in the URL
+        status = "404 Not Found";
+        response = "<html><body><h1>File not found</h1></body></html>";
+    }
+    else {
+        std::string filePath = baseDirectory + RESOURCE_PATH + "\\" + resourcePath.substr(start, end - start);
+
+        // Check if the file exists
+        if (_access(filePath.c_str(), 0) != -1) {
+            // File exists, attempt to delete it
+            if (_unlink(filePath.c_str()) == 0) {
+                status = "200 OK";
+                response = "<html><body><h1>File deleted successfully</h1></body></html>";
+            }
+            else {
+                status = "500 Internal Server Error";
+                response = "<html><body><h1>Failed to delete file</h1></body></html>";
+            }
+        }
+        else {
+            // File does not exist
+            status = "404 Not Found";
+            response = "<html><body><h1>File not found</h1></body></html>";
+        }
+    }
 
     makeHeader(response, status, contentType);
-    makeBody(response, body);
+    makeBody(response, response);
 }
 
 void getCommand(char* sendBuff, int& bytesSent, const SocketState& state) {
