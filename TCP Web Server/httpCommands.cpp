@@ -28,22 +28,30 @@ void makeBody(string& response, string body) {
     response += body;
 }
 
+string readFileContent(const string& filePath) {
+    ifstream file(filePath);
+    if (file.is_open()) {
+        stringstream buffer;
+        buffer << file.rdbuf();
+        return buffer.str();
+    }
+    else {
+        return "<html><body><h1>File not found</h1></body></html>";
+    }
+}
+
 void GetMethodHandler(string& response, const SocketState& state) {
     string status = "200 OK";
     string resourcePath = "/index.html";
     string contentType = "text/html";
-    string HTMLContent;
 
     string lang = getLanguageFromQuery(state.buffer);
-    if (lang == "he")
-        HTMLContent = "<html><body><h1>!שלום עולם</h1></body></html>";
-    else if (lang == "fr")
-        HTMLContent = "<html><body><h1>Bonjour le monde!</h1></body></html>";
-    else
-        HTMLContent = "<html><body><h1>Hello World!</h1></body></html>";
+    string filePath = baseDirectory + "\\" + lang + DEFAULT_RESOURCE;
+
+    string fileContent = readFileContent(filePath);
 
     makeHeader(response, status, contentType);
-    makeBody(response, HTMLContent);
+    makeBody(response, fileContent);
 }
 
 void HeadMethodHandler(string& response, const SocketState& state) {
@@ -208,7 +216,10 @@ const string getLanguageFromQuery(const string& buffer) {
             size_t start = langPos + 5; // length of "lang=" is 5
             size_t end = buffer.find('&', start);
             if (end == string::npos) {
-                end = buffer.length();
+                end = buffer.find(' ', start); // Find the end of the query string if no '&' is found
+                if (end == string::npos) {
+                    end = buffer.length(); // If no space is found, take the rest of the string
+                }
             }
             lang = buffer.substr(start, end - start);
 
@@ -220,6 +231,7 @@ const string getLanguageFromQuery(const string& buffer) {
 
     return lang;
 }
+
 
 const string getRequestBody(const string& buffer) {
     size_t bodyPos = buffer.find(lineSuffix + lineSuffix);

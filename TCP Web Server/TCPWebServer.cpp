@@ -287,8 +287,8 @@ int extractContentLength(SocketState& state) {
 		return state.contentLength;
 	}
 	else {
-		std::cerr << "Content-Length header not found" << std::endl;
-		return -1;
+		state.contentLength = 0;  // No content length header found
+		return 0;
 	}
 }
 
@@ -298,7 +298,7 @@ int readBody(SocketState& state) {
 
 	while (state.body.length() < static_cast<size_t>(state.contentLength)) {
 		char buffer[1024];
-		int toRead = min(state.contentLength - state.body.length(), static_cast<int>(sizeof(buffer)));
+		int toRead = min(state.contentLength - static_cast<int>(state.body.length()), static_cast<int>(sizeof(buffer)));
 		bytesReceived = recv(state.id, buffer, toRead, 0);
 		if (bytesReceived == SOCKET_ERROR) {
 			std::cerr << "recv failed: " << WSAGetLastError() << std::endl;
@@ -331,18 +331,19 @@ int receiveOneMessage(SocketState& state) {
 		}
 	}
 
-	int bodyBytes = readBody(state);
-	if (bodyBytes <= 0) {
-		return bodyBytes;
+	if (state.contentLength > 0) {
+		int bodyBytes = readBody(state);
+		if (bodyBytes < 0) {
+			return bodyBytes;
+		}
+		totalBytesReceived += bodyBytes;
 	}
-	totalBytesReceived += bodyBytes;
 
 	state.buffer = state.header + state.body;
 	state.lastTimeUsed = std::time(nullptr);
 
 	return totalBytesReceived;
 }
-
 
 
 void receiveMessage(int index) {
@@ -439,6 +440,13 @@ void sendMessage(int index) {
 		std::cout << "Web Server: Error at send(): " << WSAGetLastError() << std::endl;
 		return;
 	}
+
+	sockets[index].body = "";
+	sockets[index].buffer = "";
+	sockets[index].contentLength = 0;
+	sockets[index].header = "";
+	sockets[index].headerComplete = false;
+
 
 	std::cout << "Web Server: Sent: " << bytesSent << "\\" << strlen(sendBuff) << " bytes of \"" << sendBuff << "\" message.\n";
 
