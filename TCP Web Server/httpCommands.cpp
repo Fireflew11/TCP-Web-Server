@@ -43,17 +43,60 @@ string readFileContent(const string& filePath) {
 
 void GetMethodHandler(string& response, const SocketState& state) {
     string status = "200 OK";
-    string resourcePath = "/index.html";
     string contentType = "text/html";
+    string resourcePath = getResourcePathFromRequest(state.buffer);
 
-    string lang = getLanguageFromQuery(state.buffer);
-    string filePath = baseDirectory + "\\" + lang + DEFAULT_RESOURCE;
+    // Determine the full file path
+    string filePath;
+    if (resourcePath != DEFAULT_RESOURCE) {
+        // If a specific file is requested, look for it in the resources folder
+        filePath = baseDirectory + RESOURCE_PATH + "\\" + resourcePath;
+    }
+    else {
+        // If no specific file is requested, use the language parameter
+        string lang = getLanguageFromQuery(state.buffer);
+        filePath = baseDirectory + "\\" + lang + DEFAULT_RESOURCE;
+    }
 
+    // Read the content of the file
     string fileContent = readFileContent(filePath);
+    if (fileContent.empty()) {
+        status = "404 Not Found";
+        fileContent = "<html><body><h1>File Not Found</h1></body></html>";
+    }
 
     makeHeader(response, status, contentType);
     makeBody(response, fileContent);
 }
+
+string getResourcePathFromRequest(const string& buffer) {
+    size_t startPos = buffer.find("GET ") + 4;
+    size_t endPos = buffer.find(" HTTP", startPos);
+    string resourcePath = buffer.substr(startPos, endPos - startPos);
+
+    // Extract only the path before the query string
+    size_t queryPos = resourcePath.find('?');
+    if (queryPos != string::npos) {
+        resourcePath = resourcePath.substr(0, queryPos);
+    }
+
+    // Remove leading slash if present
+    if (!resourcePath.empty() && resourcePath.front() == '/') {
+        resourcePath = resourcePath.substr(1);
+    }
+
+    // Remove trailing slash if present
+    if (!resourcePath.empty() && resourcePath.back() == '/') {
+        resourcePath = resourcePath.substr(0, resourcePath.size() - 1);
+    }
+
+    // Default to /index.html if no resource path is specified
+    if (resourcePath.empty()) {
+        resourcePath = DEFAULT_RESOURCE;
+    }
+    return resourcePath;
+}
+
 
 void HeadMethodHandler(string& response, const SocketState& state) {
     GetMethodHandler(response, state);

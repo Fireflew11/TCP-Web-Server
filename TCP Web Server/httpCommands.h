@@ -42,6 +42,7 @@ struct SocketState {
     std::string body;       // Parsed body
     int contentLength;      // Content length of the body
     bool headerComplete;    // Flag to check if header is complete
+    bool responsePending;
 };
 
 const int TIME_PORT = 27015;
@@ -77,3 +78,4 @@ void traceCommand(char* sendBuff, int& bytesSent, const SocketState& state);
 const string getLanguageFromQuery(const string& buffer);
 const string getRequestBody(const string& buffer);
 void initializeBaseDirectory();
+string getResourcePathFromRequest(const string& buffer);

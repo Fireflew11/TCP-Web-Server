@@ -13,8 +13,6 @@ using namespace std;
 #include <algorithm>
 
 
-struct SocketState sockets[MAX_SOCKETS] = { 0 };
-int socketsCount = 0;
 bool addSocket(SOCKET id, int what);
 void removeSocket(int index);
 void acceptConnection(int index);
@@ -24,6 +22,13 @@ int readBody(SocketState& state);
 int receiveOneMessage(SocketState& state);
 void receiveMessage(int index);
 void sendMessage(int index);
+
+
+struct SocketState sockets[MAX_SOCKETS] = { 0 };
+int socketsCount = 0;
+const int TIME_FOR_TIMEOUT = 120;
+const timeval MAX_TIME_FOR_SELECT = { TIME_FOR_TIMEOUT, 0 }; // 2 minutes timeout
+
 
 void main()
 {
@@ -131,7 +136,7 @@ void main()
 		FD_ZERO(&waitRecv);
 		for (int i = 0; i < MAX_SOCKETS; i++)
 		{
-			if ((sockets[i].recv == LISTEN) || (sockets[i].recv == RECEIVE))
+			if ((sockets[i].recv == LISTEN) || (sockets[i].recv == RECEIVE) && !sockets[i].responsePending)
 				FD_SET(sockets[i].id, &waitRecv);
 		}
 
@@ -139,7 +144,7 @@ void main()
 		FD_ZERO(&waitSend);
 		for (int i = 0; i < MAX_SOCKETS; i++)
 		{
-			if (sockets[i].send == SEND)
+			if (sockets[i].send == SEND && sockets[i].responsePending)
 				FD_SET(sockets[i].id, &waitSend);
 		}
 
@@ -149,7 +154,7 @@ void main()
 		// And as written above the last is a timeout, hence we are blocked if nothing happens.
 		//
 		int nfd;
-		nfd = select(0, &waitRecv, &waitSend, NULL, NULL);
+		nfd = select(0, &waitRecv, &waitSend, NULL, &MAX_TIME_FOR_SELECT);
 		if (nfd == SOCKET_ERROR)
 		{
 			cout << "Web Server: Error at select(): " << WSAGetLastError() << endl;
@@ -186,6 +191,25 @@ void main()
 					sendMessage(i);
 					break;
 				}
+			}
+		}
+
+		if (socketsCount >= 2)
+		{
+			int socketsLeft = socketsCount - 1;
+			time_t currTime;
+			time(&currTime);
+			time_t timeToClose = difftime(currTime, TIME_FOR_TIMEOUT);
+			for (int i = 1; i < MAX_SOCKETS && socketsLeft != 0; i++)
+			{
+				if (sockets[i].id != 0 && sockets[i].lastTimeUsed <= timeToClose && sockets[i].lastTimeUsed != 0)
+				{
+					closesocket(sockets[i].id);
+					removeSocket(i);
+					socketsLeft -= 1;
+				}
+				else if (sockets[i].id != 0)
+					socketsLeft -= 1;
 			}
 		}
 	}
@@ -340,7 +364,9 @@ int receiveOneMessage(SocketState& state) {
 	}
 
 	state.buffer = state.header + state.body;
-	state.lastTimeUsed = std::time(nullptr);
+	time_t currectTime;
+	time(&currectTime);
+	state.lastTimeUsed = currectTime;
 
 	return totalBytesReceived;
 }
@@ -399,6 +425,8 @@ void receiveMessage(int index) {
 			}
 		}
 	}
+
+	sockets[index].responsePending = true;
 }
 
 
@@ -446,6 +474,7 @@ void sendMessage(int index) {
 	sockets[index].contentLength = 0;
 	sockets[index].header = "";
 	sockets[index].headerComplete = false;
+	sockets[index].responsePending = false;
 
 
 	std::cout << "Web Server: Sent: " << bytesSent << "\\" << strlen(sendBuff) << " bytes of \"" << sendBuff << "\" message.\n";
